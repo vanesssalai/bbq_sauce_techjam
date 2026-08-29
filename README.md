@@ -52,6 +52,22 @@ python scripts/download_models.py --verify   # re-hash local files against SHA25
 falls back to a revision-pinned Hub download. **Official scoring may run with
 network disabled, so `models/` must be included in the final submission bundle.**
 
+## Build the Dense Index
+
+The dense retrieval channel reads a precomputed embedding matrix (one row per
+catalog product, aligned to catalog line order). It is **not** committed
+(`data/dense_embeddings.npy` / `data/embedding_meta.json` are git-ignored);
+rebuild it after `download_models.py`:
+
+```bash
+python scripts/build_artifacts.py            # -> data/dense_embeddings.npy + embedding_meta.json
+python scripts/build_artifacts.py --verify   # check the artifact matches the current catalog
+```
+
+`embedding_meta.json` records the model revision and the catalog/embedding
+sha256s. If the artifact is missing, `DenseIndex` falls back to encoding the
+catalog at startup (slow). Include both files in the final submission bundle.
+
 ## Run the Starter
 
 Python 3.10 or later is recommended. The starter uses only the Python standard library.

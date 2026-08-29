@@ -51,17 +51,13 @@ def test_fixture_pool_shape():
 
 
 def test_skeletons_raise_not_implemented():
+    # Track R (§4a, incl. PRF) is implemented; what remains a skeleton is Track K.
+    from copilot.dialog.distill import distill
     from copilot.ranking.rank import rank
-    from copilot.retrieval.fusion import fuse
-    from copilot.retrieval.prf import expand
-    from copilot.retrieval.query import active_slots, build_query
 
     calls = [
-        lambda: fuse([], [], None),
-        lambda: expand(None, []),
         lambda: rank(None, []),
-        lambda: active_slots(None),
-        lambda: build_query(None, None),
+        lambda: distill(None),
     ]
     for call in calls:
         try:

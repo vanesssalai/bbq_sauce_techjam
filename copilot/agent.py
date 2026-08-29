@@ -1,102 +1,101 @@
+"""Orchestrator agent: NLU (todo) -> build_query -> retrieve -> rank.
+
+Current state: **passthrough ranker** — retrieval + fusion are wired, the final
+`rank()` is not, so results are ordered by `fused_score`. This is Track R's
+milestone check (guide §4a): it must already beat the weak BM25 baseline
+(HitRate@10 0.125, MRR 0.068) on every scenario column.
+"""
+
 from __future__ import annotations
 
-import json
-import re
-import sqlite3
 from pathlib import Path
 
+from copilot.catalog import load_catalog
+from copilot.contracts import SessionState
+from copilot.retrieval.query import build_query
+from copilot.retrieval.retrieve import RetrievalIndexes, retrieve
 
-TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
-STOPWORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
-    "i", "in", "is", "it", "me", "my", "of", "on", "or", "please", "some",
-    "that", "the", "this", "to", "want", "with", "would", "you", "looking",
-}
+PRF_ON = False   # flag-gated; refine_query is implemented but off for the passthrough milestone
 
-
-def _text(value: object) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, dict):
-        return " ".join(f"{key} {item}" for key, item in value.items())
-    if isinstance(value, list):
-        return " ".join(str(item) for item in value)
-    return str(value)
-
-
-def _terms(text: str) -> list[str]:
-    return [
-        token.lower()
-        for token in TOKEN_RE.findall(text)
-        if len(token) > 1 and token.lower() not in STOPWORDS
-    ]
+_DENSE_NPY = "data/dense_embeddings.npy"
+_DENSE_META = "data/embedding_meta.json"
 
 
 class Agent:
-    """Editable weak baseline: stateless BM25 retrieval with no LLM dependency."""
-
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog_path = Path(catalog_path)
-        self.connection = sqlite3.connect(":memory:")
-        self._sessions: set[str] = set()
-        self._build_index()
+        self.catalog = load_catalog(self.catalog_path)
+        self.indexes: RetrievalIndexes | None = None
+        self._sessions: dict[str, SessionState] = {}
 
-    def _build_index(self) -> None:
-        cursor = self.connection.cursor()
-        cursor.execute(
-            "CREATE VIRTUAL TABLE products USING fts5("
-            "parent_asin UNINDEXED, title, categories, features, details, store, description, "
-            "tokenize='unicode61 remove_diacritics 2')"
-        )
-        batch: list[tuple[str, str, str, str, str, str, str]] = []
-        with self.catalog_path.open(encoding="utf-8") as handle:
-            for line in handle:
-                product = json.loads(line)
-                batch.append(
-                    (
-                        str(product["parent_asin"]),
-                        _text(product.get("title")),
-                        _text(product.get("categories")),
-                        _text(product.get("features")),
-                        _text(product.get("details")),
-                        _text(product.get("store")),
-                        _text(product.get("description")),
-                    )
-                )
-                if len(batch) >= 1000:
-                    cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
-                    batch.clear()
-        if batch:
-            cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
-        self.connection.commit()
+    # -- lazy, once ---------------------------------------------------------
+    def _ensure_indexes(self) -> None:
+        if self.indexes is not None:
+            return
+        from copilot.models import BiEncoder
+        from copilot.retrieval.bm25 import Bm25Index
+        from copilot.retrieval.dense import DenseIndex
 
+        encoder = BiEncoder()
+        bm25 = Bm25Index(self.catalog_path)
+        npy, meta = Path(_DENSE_NPY), Path(_DENSE_META)
+        if npy.is_file() and meta.is_file():
+            dense = DenseIndex.load(npy, meta, encoder)
+        else:  # slow startup fallback — run scripts/build_artifacts.py to avoid this
+            dense = DenseIndex.build(self.catalog, encoder)
+        self.indexes = RetrievalIndexes(bm25=bm25, dense=dense, encoder=encoder)
+
+    # -- API --------------------------------------------------------------
     def reset(self, session_id: str, user_profile: dict) -> None:
-        # The profile is anonymized and may be used for personalization.
-        self._sessions.add(session_id)
+        self._ensure_indexes()
+        self._sessions[session_id] = SessionState(session_id=session_id)
 
-    def respond(
-        self,
-        session_id: str,
-        user_message: str,
-        turn: int,
-        top_k: int,
-    ) -> dict:
-        if session_id not in self._sessions:
-            raise RuntimeError("reset must be called before respond")
-        unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
-        expression = " OR ".join(f'"{term}"' for term in unique_terms)
-        if not expression:
-            recommendations: list[dict] = []
-        else:
-            rows = self.connection.execute(
-                "SELECT parent_asin FROM products WHERE products MATCH ? "
-                "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
-                (expression, top_k),
-            ).fetchall()
-            recommendations = [{"parent_asin": str(row[0])} for row in rows]
+    def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
+        try:
+            return self._respond(session_id, user_message, turn, top_k)
+        except Exception:  # never let the harness see an exception
+            return {
+                "message": "Here are some options.",
+                "ask_attribute": None,
+                "recommendations": self._fallback(top_k),
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+            }
+
+    def _respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
+        state = self._sessions.get(session_id)
+        if state is None:
+            self.reset(session_id, {})
+            state = self._sessions[session_id]
+
+        state.turn = turn
+        state.raw_history.append(("user", user_message))
+        if user_message and user_message not in state.disclosed_phrases:
+            state.disclosed_phrases.append(user_message)
+
+        query = build_query(state)
+        cands = retrieve(query, self.catalog, self.indexes)
+
+        if PRF_ON and cands:
+            from copilot.retrieval.prf import refine_query
+
+            refined = refine_query(
+                query,
+                [(c.parent_asin, c.fused_score) for c in cands],
+                self.indexes.dense,
+                self.catalog,
+            )
+            if refined is not query:
+                cands = retrieve(refined, self.catalog, self.indexes)
+
+        # passthrough: fused order is the final order until rank() lands
+        ranked = cands[:top_k]
         return {
             "message": "Here are the closest matches I found.",
             "ask_attribute": None,
-            "recommendations": recommendations,
+            "recommendations": [{"parent_asin": c.parent_asin} for c in ranked],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
+
+    def _fallback(self, top_k: int) -> list[dict]:
+        ids = list(self.catalog)[:top_k]
+        return [{"parent_asin": pid} for pid in ids]

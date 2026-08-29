@@ -94,8 +94,10 @@ class SessionState:
     turn: int = 0
     user_profile: UserProfile | None = None
     current_track: Literal["buying", "browsing"] | None = None
+    intent_p_buying: float = 0.5          # 0..1; set by the NLU/state-machine layer, read by retrieval.build_query
     slots: dict[str, Slot] = field(default_factory=dict)
     negated_values: dict[str, list[str]] = field(default_factory=dict)
+    disclosed_phrases: list[str] = field(default_factory=list)   # near-verbatim constraint text the customer has stated
     pending_ask_attribute: str | None = None
     relaxed_attrs: list[str] = field(default_factory=list)
     distilled_summary: str = ""

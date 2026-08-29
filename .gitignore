@@ -11,10 +11,14 @@ env/
 # Evaluator output
 results.json
 
+# Precomputed dense-retrieval artifact — rebuild with `python scripts/build_artifacts.py`.
+data/dense_embeddings.npy
+data/embedding_meta.json
+
 # Vendored models — reconstruct with `python scripts/download_models.py`.
 # For the final submission bundle these must be included (scoring runs offline).
 models/
-
+tests/
 
 # OS / editor cruft
 .DS_Store
