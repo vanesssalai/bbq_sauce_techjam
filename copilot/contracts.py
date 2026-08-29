@@ -98,6 +98,9 @@ class SessionState:
     slots: dict[str, Slot] = field(default_factory=dict)
     negated_values: dict[str, list[str]] = field(default_factory=dict)
     pending_ask_attribute: str | None = None
+    asked_attributes: set[str] = field(default_factory=set)
+    other_ask_count: int = 0
+    has_pivoted: bool = False
     relaxed_attrs: list[str] = field(default_factory=list)
     distilled_summary: str = ""
     raw_history: list[tuple[str, str]] = field(default_factory=list)

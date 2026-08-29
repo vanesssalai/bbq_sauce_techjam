@@ -3,14 +3,38 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
-from .contracts import SessionState, UserProfile
+from .contracts import ASK_ATTRIBUTE_TO_SLOTS, ParsedTurn, SessionState, UserProfile
 from .dialog.intent import build_intent_scorer
 from .dialog.nli import ZeroShotNliScorer
 from .dialog.nlu import extract_slots_and_intent
 from .dialog.semantic_slots import build_semantic_resolver
-from .dialog.state_machine import active_slots, apply_turn, record_shown
+from .dialog.state_machine import (
+    active_slots,
+    apply_turn,
+    effective_confidence,
+    note_clarification,
+    record_shown,
+)
+
+
+_ASK_PRIORITY = ("material", "color", "budget", "use_case", "style", "size", "brand")
+_ASK_TEMPLATES = {
+    "material": "Any material or fabric you prefer?",
+    "color": "Do you have a colour in mind?",
+    "budget": "What's your budget for this?",
+    "use_case": "What will you mainly use it for?",
+    "style": "What style are you going for?",
+    "size": "What size do you need?",
+    "brand": "Any particular brand you like?",
+    "other": "Anything else that matters for this?",
+}
+_MAX_DISTINCT_ASKS = 6
+_MAX_OTHER_ASKS = 2 
+_PINNED = 0.6 
+_MAX_TURNS = 10
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 STOPWORDS = {
@@ -111,7 +135,7 @@ class Agent:
             session_id=session_id, user_profile=_parse_profile(user_profile or {})
         )
 
-    def _search(self, query_text: str, top_k: int) -> list[dict]:
+    def _search(self, query_text: str, top_k: int, exclude: set[str] | None = None) -> list[dict]:
         terms = list(dict.fromkeys(_terms(query_text)))[:40]
         if not terms:
             return []
@@ -119,20 +143,51 @@ class Agent:
         rows = self.connection.execute(
             "SELECT parent_asin FROM products WHERE products MATCH ? "
             "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
-            (expression, top_k),
+            (expression, max(top_k * 15, 150)),
         ).fetchall()
-        return [{"parent_asin": str(row[0])} for row in rows]
+        asins = [str(row[0]) for row in rows]
+        exclude = exclude or set()
+        unseen = [a for a in asins if a not in exclude]
+        ranked = unseen if len(unseen) >= top_k else unseen + [a for a in asins if a in exclude]
+        return [{"parent_asin": a} for a in ranked[:top_k]]
 
     @staticmethod
-    def _accumulated_query(state: SessionState) -> str:
+    def _build_query(state: SessionState, parsed: ParsedTurn) -> str:
         parts: list[str] = []
+        if parsed.rewritten_query:
+            parts.append(parsed.rewritten_query)
         for attr, slot in active_slots(state).items():
-            if attr not in ("price_min", "price_max"):
+            if attr in ("price_min", "price_max"):
+                try:
+                    parts.append(f"${int(float(slot.value))}")
+                except (TypeError, ValueError):
+                    pass
+            else:
                 parts.append(slot.value)
         parts.extend(state.disclosed_phrases)
-        if "category" not in state.slots and state.raw_history:
-            parts.append(state.raw_history[0][1])
-        return " ".join(parts)
+        if not ({"category", "department"} & set(state.slots)) and state.raw_history:
+            parts.append(state.raw_history[0][1]) 
+        return " ".join(p for p in parts if p)
+
+    def _next_ask_attribute(self, state: SessionState, turn: int) -> str | None:
+        if turn >= _MAX_TURNS:
+            return None
+        if len(state.asked_attributes) < _MAX_DISTINCT_ASKS:
+            for attr in _ASK_PRIORITY:
+                if attr in state.asked_attributes or attr in state.no_preference:
+                    continue
+                slot_keys = ASK_ATTRIBUTE_TO_SLOTS.get(attr, [])
+                if any(
+                    (slot := state.slots.get(key)) is not None
+                    and slot.source in ("explicit", "clarification_answer")
+                    and effective_confidence(slot, state.turn) >= _PINNED
+                    for key in slot_keys
+                ):
+                    continue
+                return attr
+        if state.other_ask_count < _MAX_OTHER_ASKS and not state.has_pivoted:
+            return "other"
+        return None
 
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
         try:
@@ -160,15 +215,34 @@ class Agent:
             nli=self._nli,
             prior_slots={k: s.value for k, s in state.slots.items()},
         )
+
+        if parsed.is_hard_reset and parsed.slots:
+            parsed = replace(parsed, is_hard_reset=False)
+        if (parsed.is_override or parsed.is_hard_reset) and not state.has_pivoted:
+            state.has_pivoted = True
+            state.shown_asins.clear()
+
         apply_turn(state, parsed)
 
-        query_text = self._accumulated_query(state) or user_message
-        recommendations = self._search(query_text, top_k)
+        query_text = self._build_query(state, parsed) or user_message
+        recommendations = self._search(query_text, top_k, exclude=state.shown_asins)
         record_shown(state, [r["parent_asin"] for r in recommendations])
 
+        ask_attribute = self._next_ask_attribute(state, turn)
+        if ask_attribute:
+            note_clarification(state)
+            state.pending_ask_attribute = ask_attribute
+            if ask_attribute == "other":
+                state.other_ask_count += 1
+            else:
+                state.asked_attributes.add(ask_attribute)
+            message = _ASK_TEMPLATES.get(ask_attribute, f"Could you tell me more about {ask_attribute}?")
+        else:
+            message = "Here are the closest matches I found."
+
         return {
-            "message": "Here are the closest matches I found.",
-            "ask_attribute": None,
+            "message": message,
+            "ask_attribute": ask_attribute,
             "recommendations": recommendations,
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
