@@ -10,19 +10,27 @@ if TYPE_CHECKING:
     from .intent import EmbeddingIntentScorer
     from .semantic_slots import SemanticSlotResolver
 from ..vocab import (
+    AFFIRMATION_PHRASES,
+    AFFIRMATION_STARTS,
     BRAND_WORDS,
     CATEGORY_WORDS,
     COLOR_WORDS,
+    COMPARATIVE_SLOT_SHIFT,
     DEPARTMENT_SYNONYMS,
     DISSATISFACTION_CUES,
     HARD_RESET_CUES,
     INTENT_CUES,
+    LETTER_SIZE_ORDER,
     MATERIAL_WORDS,
     NEGATION_CUES,
     NO_PREFERENCE_CUES,
     OVERRIDE_CUES,
+    REJECTION_PHRASES,
+    REJECTION_STARTS,
+    SIZE_DOWN_CUES,
     SIZE_LETTER_RE,
     SIZE_NUMERIC_RE,
+    SIZE_UP_CUES,
     SIZE_WORD_LOOSE_RE,
     SIZE_WORD_MAP,
     SOFT_TAG_WORDS,
@@ -44,7 +52,7 @@ _PRICE_AROUND_RE = re.compile(
 _PRICE_COMPLAINT_WORDS = ["expensive", "pricey", "pricy", "cost", "costly", "overpriced"]
 
 _NEGATABLE_VOCAB = {"color": COLOR_WORDS, "material": MATERIAL_WORDS}
-_NEGATION_WINDOW = 20
+_NEGATION_WINDOW = 20 
 
 
 _PHRASE_STOPWORDS = {
@@ -140,8 +148,20 @@ _FUZZY_TOKEN_RE = re.compile(r"[a-z0-9']{5,}")
 _BRAND_FUZZY_THRESHOLD = 0.58
 
 
+_FUZZY_BRAND_STOPWORDS = (
+    set(COLOR_WORDS) | set(MATERIAL_WORDS) | set(CATEGORY_WORDS) | set(SOFT_TAG_WORDS)
+    | {
+        "please", "around", "really", "looking", "something", "anything",
+        "instead", "actually", "prefer", "budget", "cheaper", "smaller",
+        "bigger", "larger", "warmer", "lighter", "dressier", "little", "would",
+        "could", "should", "maybe", "thanks", "thank", "these", "those",
+        "under", "about", "which", "where", "whatever", "options", "another",
+    }
+)
+
+
 def _fuzzy_brand(text_lower: str) -> str | None:
-    tokens = _FUZZY_TOKEN_RE.findall(text_lower)
+    tokens = [t for t in _FUZZY_TOKEN_RE.findall(text_lower) if t not in _FUZZY_BRAND_STOPWORDS]
     if not tokens:
         return None
     candidates = list(tokens)
@@ -444,6 +464,49 @@ def _apply_comparative_price(
     return merged
 
 
+def _shift_size(prior: str, step: int) -> str | None:
+    up = prior.upper()
+    if up in LETTER_SIZE_ORDER:
+        i = LETTER_SIZE_ORDER.index(up) + step
+        return LETTER_SIZE_ORDER[i] if 0 <= i < len(LETTER_SIZE_ORDER) else None
+    try:
+        return f"{float(prior) + step:g}"
+    except ValueError:
+        return None
+
+
+def _apply_comparatives(
+    slots: dict[str, Slot], text_lower: str, prior_slots: dict[str, str] | None, turn: int
+) -> dict[str, Slot]:
+    merged = dict(slots)
+    for phrase, (slot_key, value) in COMPARATIVE_SLOT_SHIFT.items():
+        if phrase in text_lower and slot_key not in merged:
+            merged[slot_key] = Slot(value, 0.6, turn, "inferred")
+
+    if "size" not in merged and prior_slots and prior_slots.get("size"):
+        want_up = any(c in text_lower for c in SIZE_UP_CUES)
+        want_down = any(c in text_lower for c in SIZE_DOWN_CUES)
+        if want_up != want_down:
+            new = _shift_size(prior_slots["size"], 1 if want_up else -1)
+            if new:
+                merged["size"] = Slot(new, 0.6, turn, "inferred")
+    return merged
+
+
+def _detect_affirmation(text_lower: str) -> bool:
+    if any(p in text_lower for p in AFFIRMATION_PHRASES):
+        return True
+    words = text_lower.strip(" .!?").split()
+    return bool(words) and len(words) <= 6 and words[0] in AFFIRMATION_STARTS
+
+
+def _detect_rejection(text_lower: str) -> bool:
+    if any(p in text_lower for p in REJECTION_PHRASES):
+        return True
+    words = text_lower.strip(" .!?").split()
+    return bool(words) and len(words) <= 6 and words[0] in REJECTION_STARTS
+
+
 def _apply_semantic_slots(
     slots: dict[str, Slot], text: str, resolver: "SemanticSlotResolver | None", turn: int
 ) -> dict[str, Slot]:
@@ -475,6 +538,9 @@ def extract_slots_and_intent(
     text = user_message.strip()
     text_lower = text.lower()
 
+    is_affirmation = _detect_affirmation(text_lower)
+    is_rejection = _detect_rejection(text_lower)
+
     negated_values = _extract_negated_values(text_lower)
     negated_words = {attr: set(words) for attr, words in negated_values.items()}
 
@@ -485,7 +551,7 @@ def extract_slots_and_intent(
             confidence = 0.75 if attr == "brand" else 0.8
             general_slots[attr] = Slot(value, confidence, turn, "explicit")
 
-    if "brand" not in general_slots:
+    if "brand" not in general_slots and not (is_affirmation or is_rejection):
         fuzzy = _fuzzy_brand(text_lower)
         if fuzzy:
             general_slots["brand"] = Slot(fuzzy, 0.55, turn, "inferred")
@@ -500,6 +566,7 @@ def extract_slots_and_intent(
     slots = {**general_slots, **pending_bound}
     slots = _merge_llm_hint(slots, llm_hint, turn)
     slots = _apply_comparative_price(slots, text_lower, prior_slots, turn)
+    slots = _apply_comparatives(slots, text_lower, prior_slots, turn)
     slots = _apply_semantic_slots(slots, text, semantic_resolver, turn)
 
     is_hard_reset = _detect_hard_reset(text_lower)
@@ -540,6 +607,8 @@ def extract_slots_and_intent(
         intent_p_buying=intent_p_buying,
         rewritten_query=_hint_query(llm_hint),
         intent_tier=intent_tier,
+        is_affirmation=is_affirmation,
+        is_rejection=is_rejection,
     )
 
 
@@ -562,3 +631,4 @@ if __name__ == "__main__":
     print(f"is_hard_reset: {parsed.is_hard_reset}")
     print(f"intent_p_buying: {parsed.intent_p_buying:.2f} (tier={parsed.intent_tier})")
     print(f"rewritten_query: {parsed.rewritten_query!r}")
+    print(f"is_affirmation: {parsed.is_affirmation}  is_rejection: {parsed.is_rejection}")

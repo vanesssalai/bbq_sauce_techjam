@@ -144,17 +144,40 @@ SOFT_TAG_WORDS = [
     "waterproof", "stretchy", "elegant", "trendy", "classic", "modern",
 ]
 
-BUYING_CUES = [
-    "buy", "purchase", "order", "need", "want to get", "looking to buy",
-    "get me", "i'll take", "add to cart", "checkout", "asap", "today",
-    "for my", "gift for",
-]
 
-BROWSING_CUES = [
-    "just browsing", "just looking", "show me", "what do you have",
-    "any recommendations", "explore", "ideas for", "not sure yet",
-    "what's available", "curious about", "options for",
-]
+INTENT_CUES: dict[str, list[str]] = {
+    "transactional": [
+        "buy", "purchase", "order", "checkout", "check out", "add to cart",
+        "i'll take", "i will take", "get me", "want to get", "looking to buy",
+        "ready to buy", "need it", "asap", "today", "right away", "by tomorrow",
+        "key requirement", "must have", "must be", "has to be", "have to be",
+        "needs to be", "need it to", "requirement is", "non-negotiable",
+        "it should be", "specifically need", "gift for", "for my",
+        "what i need is", "what i'm looking for is", "what im looking for is",
+    ],
+    "navigational": [
+        "looking for the", "the one with", "this exact", "that model",
+        "model number", "same as", "just like the", "specific product",
+    ],
+    "commercial": [
+        "best", "top ", " better", "recommend", "suggest", "which one",
+        "which is", "compare", "comparison", " vs ", " versus ", "alternative",
+        "options", "difference between", "pros and cons", "worth it", "reviews",
+    ],
+    "informational": [
+        "how do i", "how to", "what should", "what to look for", "what kind of",
+        "help me choose", "help me pick", "not sure", "no idea", "unsure",
+        "where do i start", "ideas for", "ideas about", "ideas", "inspiration",
+        "just exploring", "still exploring", "just browsing", "just looking",
+        "seeing what", "what do you have", "what's available", "whats available",
+        "any recommendations", "open to", "browse", "curious", "not committed",
+        "explore", "not sure yet",
+    ],
+}
+
+
+BUYING_CUES = [*INTENT_CUES["transactional"], *INTENT_CUES["navigational"]]
+BROWSING_CUES = [*INTENT_CUES["commercial"], *INTENT_CUES["informational"]]
 
 OVERRIDE_CUES = [
     "actually", "instead", "never mind", "nevermind", "forget that",
@@ -166,3 +189,62 @@ NEGATION_CUES = [
     "not ", "no ", "don't want", "dont want", "except", "other than",
     "besides", "excluding",
 ]
+
+NO_PREFERENCE_CUES = [
+    "no preference", "not have a preference", "don't have a preference",
+    "dont have a preference", "do not have a preference", "no real preference",
+    "don't have an additional preference", "dont have an additional preference",
+    "no additional preference", "no particular preference",
+    "no strong preference", "no strong feelings", "not fussed", "not picky",
+    "doesn't matter", "does not matter", "doesnt matter", "either is fine",
+    "either works", "any is fine", "any works", "whatever you recommend",
+    "whatever you think", "up to you", "your call", "you decide", "you choose",
+    "your choice", "you pick", "use your judgment", "use your judgement",
+    "use your best judgment", "leave it to you", "i'll leave it to you",
+    "i'm flexible", "im flexible", "i am flexible",
+]
+
+HARD_RESET_CUES = [
+    "ignore my earlier", "ignore my previous", "ignore what i said",
+    "ignore my last", "forget my earlier", "forget my previous",
+    "forget what i said", "forget everything", "disregard my",
+    "disregard what i said", "start over", "start fresh", "scratch all that",
+    "never mind what i said", "nevermind what i said",
+]
+
+
+AFFIRMATION_STARTS = {
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "fine", "definitely",
+    "absolutely", "please",
+}
+AFFIRMATION_PHRASES = [
+    "sounds good", "that works", "works for me", "go ahead", "please do",
+    "yes please", "let's do that", "lets do that", "go for it", "why not",
+    "that would be great", "i'm ok with that", "im ok with that", "sure thing",
+]
+REJECTION_STARTS = {"no", "nope", "nah"}
+REJECTION_PHRASES = [
+    "no thanks", "rather not", "i'd rather not", "id rather not", "keep it as",
+    "keep it firm", "stick with", "leave it as", "hold firm", "not willing",
+    "don't relax", "dont relax", "keep my budget", "keep the",
+]
+
+
+COMPARATIVE_SLOT_SHIFT: dict[str, tuple[str, str]] = {
+    "more formal": ("style", "formal"), "dressier": ("style", "formal"),
+    "smarter looking": ("style", "formal"), "fancier": ("style", "formal"),
+    "more casual": ("style", "casual"), "more relaxed": ("style", "casual"),
+    "more laid back": ("style", "casual"),
+    "sportier": ("style", "sporty"), "more athletic": ("style", "sporty"),
+    "warmer": ("use_case", "winter"), "more insulated": ("use_case", "winter"),
+    "for colder weather": ("use_case", "winter"),
+}
+SIZE_UP_CUES = [
+    "size up", "one size up", "a size larger", "a size bigger", "bigger size",
+    "larger size", "go bigger", "size larger",
+]
+SIZE_DOWN_CUES = [
+    "size down", "one size down", "a size smaller", "smaller size",
+    "go smaller", "size smaller",
+]
+LETTER_SIZE_ORDER = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"]
