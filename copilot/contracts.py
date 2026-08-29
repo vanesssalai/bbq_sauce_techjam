@@ -109,3 +109,19 @@ class TurnResult:
             ],
             "usage": self.usage,
         }
+
+@dataclass
+class Query:
+    free_text: str
+    slots: dict[str, Slot]
+    negations: dict[str, list[str]]
+    intent_p_buying: float
+    track: Literal["buying", "browsing"]
+    turn: int
+    dense_vec_override: list[float] | None = None
+
+@dataclass
+class RankResult:
+    ranked: list[Candidate]
+    score_gap: float
+    why: dict[str, str]
