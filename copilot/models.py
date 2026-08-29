@@ -1,36 +1,88 @@
 """Model name constants and lazy sentence-transformers wrappers.
 
 Wrappers load on first use, so importing this module needs no torch.
+
+Official final scoring may run with network access disabled.  Both models are
+therefore vendored into ``models/`` by ``scripts/download_models.py`` (pinned to
+the exact commit revisions below).  When that directory is present the wrappers
+load straight from disk and never touch the network; otherwise they fall back to
+a revision-pinned Hugging Face Hub download, which is dev-only.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
+# --- bi-encoder (dense retrieval) --------------------------------------------
 BI_ENCODER_NAME = "BAAI/bge-small-en-v1.5"
+BI_ENCODER_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
+BI_ENCODER_DIRNAME = "bge-small-en-v1.5"
+# bge-small-en-v1.5 is asymmetric: the *query* is prefixed with this instruction,
+# documents are encoded as-is.  Dropping it measurably hurts recall.
+BI_ENCODER_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
+# --- cross-encoder (second-stage rerank) ------------------------------------
 CROSS_ENCODER_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+CROSS_ENCODER_REVISION = "233902d25c440f23af6f7d6e94d2946bac0bee0a"
+CROSS_ENCODER_DIRNAME = "ms-marco-MiniLM-L-6-v2"
+
+MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
+
+
+def _resolve(name: str, dirname: str) -> tuple[str, bool]:
+    """Return ``(path_or_id, is_local)``.
+
+    Prefer the vendored copy under ``models/`` so scoring never needs the
+    network; fall back to the Hub id when it is absent.
+    """
+    local = MODELS_DIR / dirname
+    if (local / "config.json").is_file():
+        return str(local), True
+    return name, False
 
 
 class BiEncoder:
-    """Dense embedding model. ``encode`` returns L2-normalized float32 vectors."""
+    """Dense embedding model. ``encode`` returns L2-normalized float32 vectors.
+
+    Pass ``is_query=True`` when embedding a search query so the bge instruction
+    prefix is applied; leave it False for catalog documents.
+    """
 
     def __init__(self, name: str = BI_ENCODER_NAME, device: str | None = None) -> None:
         self.name = name
         self.device = device
         self._model = None
+        if name == BI_ENCODER_NAME:
+            self.source, self.is_local = _resolve(name, BI_ENCODER_DIRNAME)
+        else:
+            self.source, self.is_local = name, Path(name).exists()
 
     def _load(self):
         if self._model is None:
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self.name, device=self.device)
+            kwargs: dict = {"device": self.device}
+            if not self.is_local:
+                kwargs["revision"] = BI_ENCODER_REVISION
+            self._model = SentenceTransformer(self.source, **kwargs)
         return self._model
 
-    def encode(self, texts, batch_size: int = 64, normalize: bool = True):
+    def encode(
+        self,
+        texts,
+        *,
+        is_query: bool = False,
+        batch_size: int = 64,
+        normalize: bool = True,
+    ):
         import numpy as np
 
         single = isinstance(texts, str)
         items = [texts] if single else list(texts)
         if not items:
             return np.zeros((0, self.dim), dtype="float32")
+        if is_query:
+            items = [BI_ENCODER_QUERY_PREFIX + t for t in items]
         vecs = self._load().encode(
             items,
             batch_size=batch_size,
@@ -47,7 +99,12 @@ class BiEncoder:
 
 
 class CrossEncoder:
-    """Pairwise reranker. ``score`` returns one float32 relevance score per doc."""
+    """Pairwise reranker. ``score`` returns one float32 relevance score per doc.
+
+    Scores are raw model logits (roughly -11..+11 for this checkpoint), not
+    probabilities: callers that blend them with other signals must normalize
+    first (e.g. sigmoid, or min-max over the batch).
+    """
 
     def __init__(
         self,
@@ -59,14 +116,19 @@ class CrossEncoder:
         self.device = device
         self.max_length = max_length
         self._model = None
+        if name == CROSS_ENCODER_NAME:
+            self.source, self.is_local = _resolve(name, CROSS_ENCODER_DIRNAME)
+        else:
+            self.source, self.is_local = name, Path(name).exists()
 
     def _load(self):
         if self._model is None:
             from sentence_transformers import CrossEncoder as _STCrossEncoder
 
-            self._model = _STCrossEncoder(
-                self.name, device=self.device, max_length=self.max_length
-            )
+            kwargs: dict = {"device": self.device, "max_length": self.max_length}
+            if not self.is_local:
+                kwargs["revision"] = CROSS_ENCODER_REVISION
+            self._model = _STCrossEncoder(self.source, **kwargs)
         return self._model
 
     def score(self, query: str, docs, batch_size: int = 32):

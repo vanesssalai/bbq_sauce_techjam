@@ -71,6 +71,16 @@ class ParsedTurn:
     answered_ask_attribute: str | None
 
 @dataclass
+class Query:
+    free_text: str                       # the SAME string fed to BM25 MATCH and to the dense encoder
+    slots: dict[str, Slot]               # active_slots(session); filters/rank pick what they need
+    negations: dict[str, list[str]]      # {attr: [values]} — never enters free_text
+    intent_p_buying: float               # 0..1 — drives fusion weights + MMR on/off
+    track: Literal["buying", "browsing"]
+    turn: int
+    dense_vec_override: list[float] | None = None   # set by PRF; dense.search uses it instead of encoding
+
+@dataclass
 class UserProfile:
     purchase_frequency: str
     average_prior_rating: float
@@ -109,3 +119,9 @@ class TurnResult:
             ],
             "usage": self.usage,
         }
+
+@dataclass
+class RankResult:
+    ranked: list[Candidate]              # best-first, len <= top_k, each with rank_score set
+    score_gap: float                     # rank_score[0] - mean(rank_score[1:4]); 0.0 if <2 results
+    why: dict[str, str]                  # {parent_asin: "leather ✓ · under $50 ✓"} for the top ~3

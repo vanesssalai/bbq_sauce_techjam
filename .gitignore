@@ -11,6 +11,11 @@ env/
 # Evaluator output
 results.json
 
+# Vendored models — reconstruct with `python scripts/download_models.py`.
+# For the final submission bundle these must be included (scoring runs offline).
+models/
+
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

@@ -1,7 +1,19 @@
-# Python 3.10+.  pip install -r requirements.txt
+# TechJam conversational shopping agent — pinned dependencies.
+# Python 3.10+.  Install:  pip install -r requirements.txt
+#
+# None of the entries below are optional: hybrid retrieval needs numpy and the
+# sentence-transformers bi-encoder.  torch is a transitive dependency of
+# sentence-transformers and is assumed already present in the scoring image; it
+# is pinned here only so a fresh environment is reproducible.
 
 numpy==1.26.4
 sentence-transformers==2.7.0
 torch==2.2.2
 
-# scikit-learn==1.4.2  # only for the learned-fusion path
+# Imported directly by scripts/download_models.py to vendor the models offline.
+# (Also a transitive dependency of sentence-transformers.)
+huggingface-hub==0.36.2
+
+# Optional — only required for the learned-fusion / logistic-blend path.
+# Uncomment when that lands.
+# scikit-learn==1.4.2
