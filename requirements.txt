@@ -1,0 +1,7 @@
+# Python 3.10+.  pip install -r requirements.txt
+
+numpy==1.26.4
+sentence-transformers==2.7.0
+torch==2.2.2
+
+# scikit-learn==1.4.2  # only for the learned-fusion path
