@@ -1,3 +1,20 @@
+# copilot conversational shopping agent -- runtime dependencies
+# Python 3.13 (CPU only). Pinned to what the agent was developed and scored against.
+#
+# Models are vendored under ./models/ by:  python -m scripts.fetch_models
+# With ./models/ present the agent runs fully offline (set HF_HUB_OFFLINE=1 to enforce).
+#
+# On Linux, install torch from the CPU wheel index:
+#   pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+
+sentence-transformers==3.4.1
+torch==2.13.0
+numpy==2.5.2
+huggingface-hub==0.36.2
+
+# Optional -- only when running with COPILOT_NLI=on (DeBERTa-v3 SentencePiece tokenizer):
+# sentencepiece==0.2.0
+# protobuf==6.31.1
 annotated-doc==0.0.5
 anyio==4.14.2
 certifi==2026.7.22
