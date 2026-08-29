@@ -6,18 +6,20 @@ import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
-from .contracts import ASK_ATTRIBUTE_TO_SLOTS, ParsedTurn, SessionState, UserProfile
+from .catalog import normalize_row
+from .contracts import ASK_ATTRIBUTE_TO_SLOTS, Candidate, SessionState, UserProfile
 from .dialog.intent import build_intent_scorer
 from .dialog.nli import ZeroShotNliScorer
 from .dialog.nlu import extract_slots_and_intent
 from .dialog.semantic_slots import build_semantic_resolver
 from .dialog.state_machine import (
-    active_slots,
     apply_turn,
     effective_confidence,
     note_clarification,
     record_shown,
 )
+from .retrieval.filters import apply_filters_with_relaxation
+from .retrieval.query import build_query
 
 
 _ASK_PRIORITY = ("material", "color", "budget", "use_case", "style", "size", "brand")
@@ -32,9 +34,25 @@ _ASK_TEMPLATES = {
     "other": "Anything else that matters for this?",
 }
 _MAX_DISTINCT_ASKS = 6
-_MAX_OTHER_ASKS = 2 
-_PINNED = 0.6 
+_MAX_OTHER_ASKS = 2
+_PINNED = 0.6
 _MAX_TURNS = 10
+_POOL_MULTIPLIER = 40  # BM25 candidates pulled per requested result, before filtering
+_POOL_MIN = 400
+
+_RELAX_LABELS = {
+    "size": "size", "department": "department", "category": "category",
+    "price_min": "minimum price", "price_max": "budget",
+}
+
+
+def _relaxation_prompt(attr: str, new_value: str | None) -> str:
+    if attr == "price_max" and new_value:
+        return f"I couldn't find anything in that budget. Include options up to about ${float(new_value):.0f}?"
+    if attr == "price_min" and new_value:
+        return f"Nothing matched above that price. Include options from about ${float(new_value):.0f}?"
+    return f"I couldn't find an exact match on {_RELAX_LABELS.get(attr, attr)}. Want me to loosen that?"
+
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 STOPWORDS = {
@@ -80,6 +98,7 @@ class Agent:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
         self._sessions: dict[str, SessionState] = {}
+        self._catalog: dict[str, Candidate] = {}
         self._build_index()
         self._nlu_ready = False
         self._intent_scorer = None
@@ -96,6 +115,8 @@ class Agent:
         batch: list[tuple[str, ...]] = []
         with self.catalog_path.open(encoding="utf-8") as handle:
             for line in handle:
+                if not line.strip():
+                    continue
                 product = json.loads(line)
                 batch.append(
                     (
@@ -108,6 +129,9 @@ class Agent:
                         _text(product.get("description")),
                     )
                 )
+                candidate = normalize_row(product)
+                if candidate is not None:
+                    self._catalog[candidate.parent_asin] = candidate
                 if len(batch) >= 1000:
                     cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
                     batch.clear()
@@ -135,7 +159,7 @@ class Agent:
             session_id=session_id, user_profile=_parse_profile(user_profile or {})
         )
 
-    def _search(self, query_text: str, top_k: int, exclude: set[str] | None = None) -> list[dict]:
+    def _bm25_pool(self, query_text: str, limit: int) -> list[str]:
         terms = list(dict.fromkeys(_terms(query_text)))[:40]
         if not terms:
             return []
@@ -143,31 +167,16 @@ class Agent:
         rows = self.connection.execute(
             "SELECT parent_asin FROM products WHERE products MATCH ? "
             "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
-            (expression, max(top_k * 15, 150)),
+            (expression, limit),
         ).fetchall()
-        asins = [str(row[0]) for row in rows]
+        return [str(row[0]) for row in rows]
+
+    def _search(self, query_text: str, top_k: int, exclude: set[str] | None = None) -> list[dict]:
+        asins = self._bm25_pool(query_text, max(top_k * 15, 150))
         exclude = exclude or set()
         unseen = [a for a in asins if a not in exclude]
         ranked = unseen if len(unseen) >= top_k else unseen + [a for a in asins if a in exclude]
         return [{"parent_asin": a} for a in ranked[:top_k]]
-
-    @staticmethod
-    def _build_query(state: SessionState, parsed: ParsedTurn) -> str:
-        parts: list[str] = []
-        if parsed.rewritten_query:
-            parts.append(parsed.rewritten_query)
-        for attr, slot in active_slots(state).items():
-            if attr in ("price_min", "price_max"):
-                try:
-                    parts.append(f"${int(float(slot.value))}")
-                except (TypeError, ValueError):
-                    pass
-            else:
-                parts.append(slot.value)
-        parts.extend(state.disclosed_phrases)
-        if not ({"category", "department"} & set(state.slots)) and state.raw_history:
-            parts.append(state.raw_history[0][1]) 
-        return " ".join(p for p in parts if p)
 
     def _next_ask_attribute(self, state: SessionState, turn: int) -> str | None:
         if turn >= _MAX_TURNS:
@@ -224,21 +233,36 @@ class Agent:
 
         apply_turn(state, parsed)
 
-        query_text = self._build_query(state, parsed) or user_message
-        recommendations = self._search(query_text, top_k, exclude=state.shown_asins)
+        query = build_query(state, parsed)
+        pool_asins = self._bm25_pool(query.free_text or user_message, max(top_k * _POOL_MULTIPLIER, _POOL_MIN))
+
+        pool = [replace(self._catalog[a]) for a in pool_asins if a in self._catalog]
+
+        survivors, relaxation = apply_filters_with_relaxation(pool, query.hard_slots, query.negations)
+        ranked = pool
+
+        unseen = [c for c in ranked if c.parent_asin not in state.shown_asins]
+        ordered = unseen if len(unseen) >= top_k else unseen + [c for c in ranked if c.parent_asin in state.shown_asins]
+        recommendations = [{"parent_asin": c.parent_asin} for c in ordered[:top_k]]
         record_shown(state, [r["parent_asin"] for r in recommendations])
 
-        ask_attribute = self._next_ask_attribute(state, turn)
-        if ask_attribute:
-            note_clarification(state)
-            state.pending_ask_attribute = ask_attribute
-            if ask_attribute == "other":
-                state.other_ask_count += 1
-            else:
-                state.asked_attributes.add(ask_attribute)
-            message = _ASK_TEMPLATES.get(ask_attribute, f"Could you tell me more about {ask_attribute}?")
+        ask_attribute = None
+        if not survivors and relaxation and turn < _MAX_TURNS:
+           
+            state.pending_relaxation = relaxation
+            message = _relaxation_prompt(*relaxation)
         else:
-            message = "Here are the closest matches I found."
+            ask_attribute = self._next_ask_attribute(state, turn)
+            if ask_attribute:
+                note_clarification(state)
+                state.pending_ask_attribute = ask_attribute
+                if ask_attribute == "other":
+                    state.other_ask_count += 1
+                else:
+                    state.asked_attributes.add(ask_attribute)
+                message = _ASK_TEMPLATES.get(ask_attribute, f"Could you tell me more about {ask_attribute}?")
+            else:
+                message = "Here are the closest matches I found."
 
         return {
             "message": message,
