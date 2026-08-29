@@ -55,7 +55,7 @@ class Slot:
     value: str
     confidence: float
     turn_set: int
-    source: Literal["explicit", "clarification_answer", "inferred"]
+    source: Literal["explicit", "clarification_answer", "inferred", "llm"]
 
 @dataclass
 class ParsedTurn:
@@ -69,6 +69,17 @@ class ParsedTurn:
     soft_tags: list[str]
     negated_values: dict[str, list[str]]
     answered_ask_attribute: str | None
+    is_dissatisfied: bool = False
+    dissatisfaction_attribute: str | None = None
+    disclosed_phrases: list[str] = field(default_factory=list)
+    is_no_preference: bool = False
+    no_preference_attribute: str | None = None
+    is_hard_reset: bool = False
+    intent_p_buying: float = 0.5
+    rewritten_query: str | None = None
+    intent_tier: str = "none"
+    is_affirmation: bool = False
+    is_rejection: bool = False
 
 @dataclass
 class UserProfile:
@@ -87,10 +98,18 @@ class SessionState:
     slots: dict[str, Slot] = field(default_factory=dict)
     negated_values: dict[str, list[str]] = field(default_factory=dict)
     pending_ask_attribute: str | None = None
+    asked_attributes: set[str] = field(default_factory=set)
+    other_ask_count: int = 0
+    has_pivoted: bool = False
     relaxed_attrs: list[str] = field(default_factory=list)
     distilled_summary: str = ""
     raw_history: list[tuple[str, str]] = field(default_factory=list)
     shown_asins: set[str] = field(default_factory=set)
+    no_preference: set[str] = field(default_factory=set)
+    disclosed_phrases: list[str] = field(default_factory=list)
+    clarify_count: int = 0
+    intent_p_buying: float = 0.5
+    pending_relaxation: tuple[str, str | None] | None = None
 
 @dataclass
 class TurnResult:
