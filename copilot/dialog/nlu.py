@@ -8,6 +8,7 @@ from .fuzzy import best_fuzzy_match
 
 if TYPE_CHECKING:
     from .intent import EmbeddingIntentScorer
+    from .nli import ZeroShotNliScorer
     from .semantic_slots import SemanticSlotResolver
 from ..vocab import (
     AFFIRMATION_PHRASES,
@@ -52,7 +53,7 @@ _PRICE_AROUND_RE = re.compile(
 _PRICE_COMPLAINT_WORDS = ["expensive", "pricey", "pricy", "cost", "costly", "overpriced"]
 
 _NEGATABLE_VOCAB = {"color": COLOR_WORDS, "material": MATERIAL_WORDS}
-_NEGATION_WINDOW = 20 
+_NEGATION_WINDOW = 20
 
 
 _PHRASE_STOPWORDS = {
@@ -507,6 +508,22 @@ def _detect_rejection(text_lower: str) -> bool:
     return bool(words) and len(words) <= 6 and words[0] in REJECTION_STARTS
 
 
+def _nli_signals(nli: "ZeroShotNliScorer | None", text: str) -> dict:
+    if nli is None or not text:
+        return {}
+    out: dict = {}
+    try:
+        out["p_buying"] = nli.intent_p_buying(text)
+    except Exception:
+        out["p_buying"] = None
+    for job, tau in (("no_preference", 0.68), ("hard_reset", 0.80), ("dissatisfied", 0.68)):
+        try:
+            out[job] = bool(nli.flag(job, text, tau=tau))
+        except Exception:
+            out[job] = False
+    return out
+
+
 def _apply_semantic_slots(
     slots: dict[str, Slot], text: str, resolver: "SemanticSlotResolver | None", turn: int
 ) -> dict[str, Slot]:
@@ -533,6 +550,7 @@ def extract_slots_and_intent(
     intent_scorer: "EmbeddingIntentScorer | None" = None,
     llm_hint: dict | None = None,
     semantic_resolver: "SemanticSlotResolver | None" = None,
+    nli: "ZeroShotNliScorer | None" = None,
     prior_slots: dict[str, str] | None = None,
 ) -> ParsedTurn:
     text = user_message.strip()
@@ -540,6 +558,7 @@ def extract_slots_and_intent(
 
     is_affirmation = _detect_affirmation(text_lower)
     is_rejection = _detect_rejection(text_lower)
+    nli_sig = _nli_signals(nli, text)
 
     negated_values = _extract_negated_values(text_lower)
     negated_words = {attr: set(words) for attr, words in negated_values.items()}
@@ -568,8 +587,15 @@ def extract_slots_and_intent(
     slots = _apply_comparative_price(slots, text_lower, prior_slots, turn)
     slots = _apply_comparatives(slots, text_lower, prior_slots, turn)
     slots = _apply_semantic_slots(slots, text, semantic_resolver, turn)
+    if nli is not None and "use_case" not in slots:
+        try:
+            uc = nli.use_case(text)
+        except Exception:
+            uc = None
+        if uc:
+            slots = {**slots, "use_case": Slot(uc, 0.6, turn, "inferred")}
 
-    is_hard_reset = _detect_hard_reset(text_lower)
+    is_hard_reset = _detect_hard_reset(text_lower) or bool(nli_sig.get("hard_reset"))
     is_override = _detect_override(text_lower) or is_hard_reset
     overridden_attrs = list(slots.keys()) if is_override else []
 
@@ -581,11 +607,21 @@ def extract_slots_and_intent(
         intent_p_buying = 0.5 * intent_p_buying + 0.5 * float(hint_p_buying)
         intent = "buying" if intent_p_buying >= 0.5 else "browsing"
         intent_confidence = max(intent_confidence, min(0.95, 0.5 + abs(intent_p_buying - 0.5)))
+    nli_p = nli_sig.get("p_buying")
+    if isinstance(nli_p, (int, float)) and 0.0 <= float(nli_p) <= 1.0:
+        intent_p_buying = 0.65 * intent_p_buying + 0.35 * float(nli_p)
+        intent = "buying" if intent_p_buying >= 0.5 else "browsing"
+        intent_confidence = max(intent_confidence, min(0.95, 0.5 + abs(intent_p_buying - 0.5)))
 
     soft_tags = _extract_soft_tags(text_lower)
     is_dissatisfied, dissatisfaction_attribute = _detect_dissatisfaction(text_lower)
+    if not is_dissatisfied and nli_sig.get("dissatisfied"):
+        is_dissatisfied, dissatisfaction_attribute = True, "other"
     disclosed_phrases = _extract_disclosed_phrases(text)
     is_no_preference, no_preference_attribute = _detect_no_preference(text_lower)
+    if not is_no_preference and nli_sig.get("no_preference"):
+        is_no_preference = True
+        no_preference_attribute = pending_ask_attribute
 
     return ParsedTurn(
         raw_text=user_message,

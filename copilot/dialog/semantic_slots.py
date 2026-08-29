@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import math
-from typing import Protocol, Sequence
+from typing import Sequence
 
-
-class Encoder(Protocol):
-    def encode(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
-        ...
+from ..models import Encoder
 
 
 PROTOTYPES: dict[str, dict[str, list[str]]] = {
@@ -114,3 +111,15 @@ class SemanticSlotResolver:
             if top_score >= self._threshold:
                 out[slot] = (top_value, top_score)
         return out
+
+
+def build_semantic_resolver(
+    encoder: Encoder | None = None, *, threshold: float = 0.42
+) -> "SemanticSlotResolver | None":
+    if encoder is None:
+        try:
+            encoder = Encoder()
+            encoder.encode(["probe"])  # force the lazy load
+        except Exception:
+            return None
+    return SemanticSlotResolver(encoder, threshold=threshold)

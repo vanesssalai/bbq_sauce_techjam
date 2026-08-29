@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import math
-from typing import Literal, Protocol, Sequence
+from typing import Literal, Sequence
+
+from ..models import Encoder
 
 Track = Literal["buying", "browsing"]
 
-# cold start prototype anchors -->  uses cosind similarity
+# cold-start prototype anchors -->  uses cosind similarity
 BUYING_ANCHORS: list[str] = [
     "I need a specific item and it has to meet these requirements.",
     "Looking for a black leather crossbody bag, medium size.",
@@ -22,11 +24,6 @@ BROWSING_ANCHORS: list[str] = [
 ]
 
 _SIM_GAIN = 6.0
-
-
-class Encoder(Protocol):
-    def encode(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
-        ...
 
 
 def _dot(a: Sequence[float], b: Sequence[float]) -> float:
@@ -121,3 +118,32 @@ class EmbeddingIntentScorer:
         p_buying = _sigmoid(self._gain * (buy_sim - browse_sim))
         p_buying = min(0.99, max(0.01, p_buying))
         return ("buying" if p_buying >= 0.5 else "browsing"), p_buying
+
+
+def load_anchors(path: str = "data/intent_anchors.json") -> tuple[list, list] | None:
+    import json
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return list(data["buy_vectors"]), list(data["browse_vectors"])
+    except (ValueError, KeyError, OSError):
+        return None
+
+
+def build_intent_scorer(
+    encoder: Encoder | None = None, *, anchors_path: str = "data/intent_anchors.json"
+) -> "EmbeddingIntentScorer | None":
+    if encoder is None:
+        try:
+            encoder = Encoder()
+            encoder.encode(["probe"])  # force the lazy load
+        except Exception:
+            return None
+    anchors = load_anchors(anchors_path)
+    if anchors is not None:
+        return EmbeddingIntentScorer(encoder, buy_vectors=anchors[0], browse_vectors=anchors[1])
+    return EmbeddingIntentScorer(encoder)
