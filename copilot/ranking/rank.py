@@ -9,12 +9,8 @@ def _flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "on", "true", "yes")
 
 
-# Return the retrieval (fused) order untouched -- no cross-encoder, no
-# tournament. Mirrors test2's `ranked = pool`.
 _PASSTHROUGH = _flag("COPILOT_RANK_PASSTHROUGH")
-# Blend the cross-encoder ordering with the fused (retrieval) ordering via RRF,
-# so a miscalibrated MS-MARCO logit can nudge but not overwrite the pool order.
-# On by default; COPILOT_CE_BASE=1 restores the raw min-max base.
+
 _CE_BLEND = not _flag("COPILOT_CE_BASE")
 _CE_BLEND_K = 60
 try:
@@ -50,11 +46,6 @@ def _ranks_by(candidates: list[Candidate], key) -> dict[str, int]:
 
 
 def _copeland_tournament(candidates: list[Candidate]) -> list[Candidate]:
-    """
-    Copeland rank-aggregation over {bm25_rank, dense_rank, fused_rank, ce_rank}.
-    For each pair (a, b): a wins iff a majority of the four rankings place a above b.
-    copeland(a) = wins - losses. Re-sort by copeland score, ties broken by ce (rank_score).
-    """
     bm25_ranks = _ranks_by(candidates, key=lambda c: c.bm25_score)
     dense_ranks = _ranks_by(candidates, key=lambda c: c.dense_score)
     fused_ranks = {c.parent_asin: (c.fused_rank if c.fused_rank is not None else len(candidates))
@@ -69,7 +60,7 @@ def _copeland_tournament(candidates: list[Candidate]) -> list[Candidate]:
     for i, a in enumerate(candidates):
         for b in candidates[i + 1:]:
             ra, rb = rank_tuple(a.parent_asin), rank_tuple(b.parent_asin)
-            # lower rank number = better; count how many of the 4 rankings prefer a over b
+
             a_votes = sum(1 for x, y in zip(ra, rb) if x < y)
             b_votes = sum(1 for x, y in zip(ra, rb) if y < x)
             if a_votes > b_votes:
@@ -78,7 +69,6 @@ def _copeland_tournament(candidates: list[Candidate]) -> list[Candidate]:
             elif b_votes > a_votes:
                 copeland_score[b.parent_asin] += 1
                 copeland_score[a.parent_asin] -= 1
-            # tie in votes -> no change to either
 
     return sorted(
         candidates,
@@ -97,7 +87,6 @@ def rank(
     weights=None,
     use_tournament: bool = False,
 ) -> RankResult:
-    # Work on a stable order by fused_rank first.
     by_fused = sorted(
         candidates,
         key=lambda c: (c.fused_rank if c.fused_rank is not None else 10**9,
@@ -109,8 +98,10 @@ def rank(
             c.rank_score = 1.0 / (1 + i)
         ranked = by_fused[:top_k]
     else:
-        # 7a: cross-encoder rerank over the top N by fused_rank.
-        N = 100
+        try:
+            N = int(os.environ.get("COPILOT_CE_TOP_N", "100"))
+        except ValueError:
+            N = 100
         top_n = by_fused[:N]
         rest = by_fused[N:]
 
@@ -140,7 +131,6 @@ def rank(
             c.rank_score = head_lo - 1e-3 * (i + 1)
         by_fused = top_n + rest
 
-        # 7b: tournament head over the top M=20, only if a cross-encoder ran.
         if use_tournament:
             M = 20
             by_fused = _copeland_tournament(by_fused[:M]) + by_fused[M:]

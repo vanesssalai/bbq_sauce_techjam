@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 
 from ..contracts import (
@@ -16,14 +17,19 @@ _TRACK_SWITCH_CONFIDENCE = 0.6
 _OVERRIDE_CONFIDENCE = 0.95
 _TURN_BUDGET_CRITICAL = 2
 
-_PINNED_CONFIDENCE = 0.6 # a slot this fresh needs no clarifying question
-_MAX_CLARIFICATIONS = 2  # cap on clarifying questions per session
-_SECOND_QUESTION_MIN_REMAINING = 5 # dont spend a 2nd question with fewer turns left
+_PINNED_CONFIDENCE = 0.6 
 
-_KEEP_ON_HARD_RESET = {"category", "department"} # might change see how
 
-_INTENT_EMA_ALPHA = 0.35 # weight on the current turn's p_buying
-_MAX_SESSION_PHRASES = 16 # cap the running disclosed-phrase list
+try:
+    _MAX_CLARIFICATIONS = int(os.environ.get("COPILOT_MAX_CLARIFY", "6"))
+except ValueError:
+    _MAX_CLARIFICATIONS = 6
+_SECOND_QUESTION_MIN_REMAINING = 2
+
+_KEEP_ON_HARD_RESET = {"category", "department"} 
+
+_INTENT_EMA_ALPHA = 0.35
+_MAX_SESSION_PHRASES = 16 
 
 
 def apply_turn(session: SessionState, parsed: ParsedTurn) -> SessionState:
