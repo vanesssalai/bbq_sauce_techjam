@@ -1,11 +1,23 @@
 # copilot conversational shopping agent -- runtime dependencies
-# Python 3.13 (CPU only). Pinned to what the agent was developed and scored against.
+# Python 3.13. Pinned to what the agent was developed and scored against.
 #
 # Models are vendored under ./models/ by:  python -m scripts.fetch_models
 # With ./models/ present the agent runs fully offline (set HF_HUB_OFFLINE=1 to enforce).
 #
-# On Linux, install torch from the CPU wheel index:
-#   pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+# --- torch: install the build that matches the machine -----------------------
+# The agent auto-selects the device (copilot/models._pick_device): CUDA, then
+# Apple-Silicon MPS, then CPU. Force one with  COPILOT_DEVICE=cpu|cuda|mps.
+# It always runs on CPU if no accelerator wheel is installed, so `pip install
+# torch==2.13.0` alone is a valid (slower) setup.
+#
+#   NVIDIA GPU (Linux/Windows):   CUDA 12.x wheel
+#     pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu126
+#   Apple Silicon (macOS arm64):  the default wheel already ships MPS -- nothing extra
+#     pip install torch==2.13.0
+#     (transformer ops without an MPS kernel fall back to CPU via
+#      PYTORCH_ENABLE_MPS_FALLBACK=1, which _pick_device sets automatically)
+#   CPU only (any OS, incl. final offline scoring):
+#     pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
 
 sentence-transformers==3.4.1
 torch==2.13.0
