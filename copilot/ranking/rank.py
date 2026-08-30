@@ -1,17 +1,24 @@
 from __future__ import annotations
 
-from copilot.contracts import Candidate, Query, RankResult, SessionState
+from ..contracts import Candidate, Query, RankResult, SessionState
+
+_CE_TOP_N = 100
+_CE_DOC_MAX_TOKENS = 60 
+
+_BELOW_BAND = -1.0 
+
+_TOURNAMENT_TOP_M = 20
+_BT_ITERS = 60   
+
+def _track(q: Query) -> str:
+    return "buying" if q.intent_p_buying >= 0.5 else "browsing"
 
 
 def _build_ce_query(q: Query) -> str:
-    """Compact render of the Query for the cross-encoder: category · slots · free_text."""
     parts: list[str] = []
-    category_slot = q.slots.get("category")
-    if category_slot is not None:
-        parts.append(category_slot.value)
-    for attr, slot in q.slots.items():
-        if attr == "category":
-            continue
+    if q.category_anchor:
+        parts.append(q.category_anchor)
+    for attr, slot in (*q.hard_slots.items(), *q.soft_slots.items()):
         parts.append(f"{attr}={slot.value}")
     if q.free_text:
         parts.append(q.free_text)
@@ -19,7 +26,10 @@ def _build_ce_query(q: Query) -> str:
 
 
 def _ce_doc_text(c: Candidate) -> str:
-    text = c.search_text or c.title
+    text = (c.search_text or c.title or "").strip()
+    tokens = text.split()
+    if len(tokens) > _CE_DOC_MAX_TOKENS:
+        return " ".join(tokens[:_CE_DOC_MAX_TOKENS])
     return text
 
 
@@ -29,42 +39,127 @@ def _ranks_by(candidates: list[Candidate], key) -> dict[str, int]:
     return {c.parent_asin: i + 1 for i, c in enumerate(ordered)}
 
 
+def _by_fused(candidates: list[Candidate]) -> list[Candidate]:
+    incoming = {id(c): i for i, c in enumerate(candidates)}
+    return sorted(
+        candidates,
+        key=lambda c: (
+            c.fused_rank if c.fused_rank is not None else 10**9,
+            -(c.fused_score if c.fused_score is not None else 0.0),
+            incoming[id(c)],
+        ),
+    )
+
+
+def _active_rankings(candidates: list[Candidate]) -> list[dict[str, int]]:
+    rankings: list[dict[str, int]] = []
+    if len({c.bm25_score for c in candidates}) > 1:
+        rankings.append(_ranks_by(candidates, key=lambda c: c.bm25_score))
+    if len({c.dense_score for c in candidates}) > 1:
+        rankings.append(_ranks_by(candidates, key=lambda c: c.dense_score))
+    if len({c.fused_rank for c in candidates if c.fused_rank is not None}) > 1:
+        rankings.append(_ranks_by(
+            candidates,
+            key=lambda c: c.fused_rank if c.fused_rank is not None else 10**9,
+            reverse=False,
+        ))
+    if len({c.rank_score for c in candidates if c.rank_score is not None}) > 1:
+        rankings.append(_ranks_by(
+            candidates,
+            key=lambda c: c.rank_score if c.rank_score is not None else _BELOW_BAND,
+        ))
+    return rankings
+
+
 def _copeland_tournament(candidates: list[Candidate]) -> list[Candidate]:
-    """
-    Copeland rank-aggregation over {bm25_rank, dense_rank, fused_rank, ce_rank}.
-    For each pair (a, b): a wins iff a majority of the four rankings place a above b.
-    copeland(a) = wins - losses. Re-sort by copeland score, ties broken by ce (rank_score).
-    """
-    bm25_ranks = _ranks_by(candidates, key=lambda c: c.bm25_score)
-    dense_ranks = _ranks_by(candidates, key=lambda c: c.dense_score)
-    fused_ranks = {c.parent_asin: (c.fused_rank if c.fused_rank is not None else len(candidates))
-                   for c in candidates}
-    ce_ranks = _ranks_by(candidates, key=lambda c: c.rank_score if c.rank_score is not None else 0.0)
+    """Copeland rank-aggregation (handoff §6, ranking method ③). Raw CE logits
+    are poorly calibrated, so aggregate the orderings already in hand
+    ({bm25, dense, fused, ce} ranks that carry signal). Each pair (a, b) is a
+    pairwise-majority contest -- `a` wins it when more of the active rankings put
+    `a` above `b`; `copeland(a) = wins − losses`. Re-sort by that, ties broken by
+    the cross-encoder score. Zero extra model calls."""
+    rankings = _active_rankings(candidates)
+    if not rankings:
+        return list(candidates)
 
-    def rank_tuple(asin: str) -> tuple[int, int, int, int]:
-        return (bm25_ranks[asin], dense_ranks[asin], fused_ranks[asin], ce_ranks[asin])
-
-    copeland_score: dict[str, int] = {c.parent_asin: 0 for c in candidates}
-
+    score: dict[str, int] = {c.parent_asin: 0 for c in candidates}
     for i, a in enumerate(candidates):
+        ai = a.parent_asin
         for b in candidates[i + 1:]:
-            ra, rb = rank_tuple(a.parent_asin), rank_tuple(b.parent_asin)
-            # lower rank number = better; count how many of the 4 rankings prefer a over b
-            a_votes = sum(1 for x, y in zip(ra, rb) if x < y)
-            b_votes = sum(1 for x, y in zip(ra, rb) if y < x)
+            bi = b.parent_asin
+            a_votes = sum(1 for r in rankings if r[ai] < r[bi])
+            b_votes = sum(1 for r in rankings if r[bi] < r[ai])
             if a_votes > b_votes:
-                copeland_score[a.parent_asin] += 1
-                copeland_score[b.parent_asin] -= 1
+                score[ai] += 1
+                score[bi] -= 1
             elif b_votes > a_votes:
-                copeland_score[b.parent_asin] += 1
-                copeland_score[a.parent_asin] -= 1
-            # tie in votes -> no change to either
+                score[bi] += 1
+                score[ai] -= 1
 
     return sorted(
         candidates,
-        key=lambda c: (copeland_score[c.parent_asin], c.rank_score if c.rank_score is not None else 0.0),
+        key=lambda c: (score[c.parent_asin], c.rank_score if c.rank_score is not None else 0.0),
         reverse=True,
     )
+
+
+def _perturbed_ce_queries(q: Query) -> list[str]:
+    anchor = q.category_anchor
+    slots = [f"{a}={s.value}" for a, s in (*q.hard_slots.items(), *q.soft_slots.items())]
+    ft = q.free_text
+    raw = [
+        _build_ce_query(q),
+        " · ".join(p for p in (anchor, ft) if p),
+        " · ".join(p for p in (anchor, *slots) if p),
+        ft or anchor,
+        " · ".join(p for p in (anchor, *reversed(slots), ft) if p),
+    ]
+    out: list[str] = []
+    for v in (s.strip() for s in raw):
+        if v and v not in out:
+            out.append(v)
+    return out or [q.free_text or q.category_anchor or ""]
+
+
+def _bradley_terry(candidates: list[Candidate], q: Query, cross_encoder) -> list[Candidate]:
+    asins = [c.parent_asin for c in candidates]
+    docs = [_ce_doc_text(c) for c in candidates]
+    wins: dict[str, dict[str, float]] = {a: {b: 0.0 for b in asins} for a in asins}
+
+    for qv in _perturbed_ce_queries(q):
+        try:
+            sc = [float(x) for x in cross_encoder.score(qv, docs)]
+        except Exception:
+            continue
+        if len(sc) != len(asins):
+            continue
+        for i in range(len(asins)):
+            for j in range(i + 1, len(asins)):
+                if sc[i] > sc[j]:
+                    wins[asins[i]][asins[j]] += 1.0
+                elif sc[j] > sc[i]:
+                    wins[asins[j]][asins[i]] += 1.0
+                else:
+                    wins[asins[i]][asins[j]] += 0.5
+                    wins[asins[j]][asins[i]] += 0.5
+
+    if not any(wins[a][b] for a in asins for b in asins if a != b):
+        return list(candidates)
+
+    strength = {a: 1.0 for a in asins}
+    for _ in range(_BT_ITERS):
+        nxt: dict[str, float] = {}
+        for a in asins:
+            num = sum(wins[a][b] for b in asins if b != a)
+            den = sum(
+                (wins[a][b] + wins[b][a]) / (strength[a] + strength[b])
+                for b in asins if b != a
+            )
+            nxt[a] = num / den if den > 0 else strength[a]
+        mean = sum(nxt.values()) / len(nxt) or 1.0
+        strength = {a: v / mean for a, v in nxt.items()}
+
+    return sorted(candidates, key=lambda c: strength[c.parent_asin], reverse=True)
 
 
 def rank(
@@ -76,57 +171,48 @@ def rank(
     cross_encoder=None,
     weights=None,
     use_tournament: bool = False,
+    tournament_method: str = "copeland",
 ) -> RankResult:
-    # Work on a stable order by fused_rank/fused_score first.
-    by_fused = sorted(
-        candidates,
-        key=lambda c: c.fused_score if c.fused_score is not None else 0.0,
-        reverse=True,
-    )
+    ordered = _by_fused(candidates)
 
-    if cross_encoder is None:
-        # Degraded mode: no cross-encoder available, base = fused_score.
-        for c in by_fused:
-            c.rank_score = c.fused_score if c.fused_score is not None else 0.0
-    else:
-        # 7a: cross-encoder rerank over the top N by fused_rank.
-        N = 100
-        top_n = by_fused[:N]
-        rest = by_fused[N:]
-
-        ce_query = _build_ce_query(q)
-        doc_texts = [_ce_doc_text(c) for c in top_n]
-        ce_scores = cross_encoder.score(ce_query, doc_texts)
-
-        # min-max normalize over N -> base in [0, 1]
-        if len(ce_scores) > 0:
-            lo, hi = float(min(ce_scores)), float(max(ce_scores))
+    ce_ran = False
+    if cross_encoder is not None and ordered:
+        head, tail = ordered[:_CE_TOP_N], ordered[_CE_TOP_N:]
+        try:
+            raw = cross_encoder.score(_build_ce_query(q), [_ce_doc_text(c) for c in head])
+            ce_scores = [float(x) for x in raw]
+        except Exception:
+            ce_scores = []
+        if len(ce_scores) == len(head) and head:
+            lo, hi = min(ce_scores), max(ce_scores)
             span = hi - lo
-            for c, raw in zip(top_n, ce_scores):
-                c.rank_score = (float(raw) - lo) / span if span > 0 else 0.5
-        for c in rest:
-            c.rank_score = c.fused_score if c.fused_score is not None else 0.0
+            for c, s in zip(head, ce_scores):
+                c.rank_score = (s - lo) / span if span > 0 else 0.5
 
-        by_fused = top_n + rest
+            for i, c in enumerate(tail):
+                c.rank_score = _BELOW_BAND - 1.0 - i
+            ordered = head + tail
+            ce_ran = True
 
-        # 7b: tournament head over the top M=20, only if a cross-encoder ran.
-        if use_tournament:
-            M = 20
-            top_m = by_fused[:M]
-            rest_after_m = by_fused[M:]
-            reordered_top_m = _copeland_tournament(top_m)
-            by_fused = reordered_top_m + rest_after_m
+    if not ce_ran:
+        for i, c in enumerate(ordered):
+            c.rank_score = c.fused_score if c.fused_score is not None else _BELOW_BAND - i
 
-    if use_tournament and cross_encoder is not None:
-        # Preserve the tournament's Copeland order for the top M; rest stays fused/ce order.
-        ranked = by_fused[:top_k]
+    if use_tournament and ce_ran:
+        m = min(_TOURNAMENT_TOP_M, len(ordered))
+        head_m = ordered[:m]
+        if tournament_method == "bradley_terry":
+            head_m = _bradley_terry(head_m, q, cross_encoder)
+        else:
+            head_m = _copeland_tournament(head_m)
+        ordered = head_m + ordered[m:]
+        ranked = ordered[:top_k]
     else:
-        ranked = sorted(by_fused, key=lambda c: c.rank_score, reverse=True)[:top_k]
+        ranked = sorted(ordered, key=lambda c: c.rank_score, reverse=True)[:top_k]
 
     if len(ranked) >= 2:
-        top = ranked[0].rank_score
-        next_few = [c.rank_score for c in ranked[1:4]]
-        score_gap = top - (sum(next_few) / len(next_few))
+        nxt = [c.rank_score for c in ranked[1:4]]
+        score_gap = ranked[0].rank_score - (sum(nxt) / len(nxt))
     else:
         score_gap = 0.0
 
