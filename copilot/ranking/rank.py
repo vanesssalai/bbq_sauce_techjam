@@ -44,11 +44,6 @@ def _ranks_by(candidates: list[Candidate], key) -> dict[str, int]:
 
 
 def _copeland_tournament(candidates: list[Candidate]) -> list[Candidate]:
-    """
-    Copeland rank-aggregation over {bm25_rank, dense_rank, fused_rank, ce_rank}.
-    For each pair (a, b): a wins iff a majority of the four rankings place a above b.
-    copeland(a) = wins - losses. Re-sort by copeland score, ties broken by ce (rank_score).
-    """
     bm25_ranks = _ranks_by(candidates, key=lambda c: c.bm25_score)
     dense_ranks = _ranks_by(candidates, key=lambda c: c.dense_score)
     fused_ranks = {c.parent_asin: (c.fused_rank if c.fused_rank is not None else len(candidates))
@@ -233,7 +228,10 @@ def rank(
         for i, c in enumerate(by_fused):
             c.rank_score = 1.0 / (1 + i)
     else:
-        N = 100
+        try:
+            N = int(os.environ.get("COPILOT_CE_TOP_N", "30"))
+        except ValueError:
+            N = 30
         top_n = by_fused[:N]
         rest = by_fused[N:]
 

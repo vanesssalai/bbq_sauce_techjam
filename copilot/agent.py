@@ -143,19 +143,21 @@ class Agent:
             except Exception:
                 shared = None
 
-        try:
-            from .dialog.intent import build_intent_scorer
+        if not _flag("COPILOT_NO_INTENT_SCORER"):
+            try:
+                from .dialog.intent import build_intent_scorer
 
-            self._intent_scorer = build_intent_scorer(shared)
-        except Exception:
-            self._intent_scorer = None
+                self._intent_scorer = build_intent_scorer(shared)
+            except Exception:
+                self._intent_scorer = None
 
-        try:
-            from .dialog.semantic_slots import build_semantic_resolver
+        if _flag("COPILOT_SEM_SLOTS"):
+            try:
+                from .dialog.semantic_slots import build_semantic_resolver
 
-            self._sem_resolver = build_semantic_resolver(shared)
-        except Exception:
-            self._sem_resolver = None
+                self._sem_resolver = build_semantic_resolver(shared)
+            except Exception:
+                self._sem_resolver = None
 
         try:
             from .dialog.nli import ZeroShotNliScorer
@@ -215,8 +217,11 @@ class Agent:
         if (parsed.is_override or parsed.is_hard_reset) and not state.has_pivoted:
             state.has_pivoted = True
             state.shown_asins.clear()
+            
+            if _flag("COPILOT_PIVOT_CLEAR_PHRASES"):
+                state.disclosed_phrases.clear()
 
-        apply_turn(state, parsed) 
+        apply_turn(state, parsed)
 
         query = build_query(state, parsed)
         candidates = self._retrieve(query)
