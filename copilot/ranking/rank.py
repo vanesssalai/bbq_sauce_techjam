@@ -21,6 +21,11 @@ _BT_ITERS = 60
 _PRICE_OVER_HARD = 2.0 
 _NEGATION_PENALTY = 5.0 
 _RATING_SATURATION = math.log1p(3000) 
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+_MMR_LAMBDA = 0.70 
+_MMR_POOL = 60
+_MMR_MIN_POOL = 4 
 
 
 @dataclass
@@ -280,6 +285,57 @@ def _soft_adjustment(c: Candidate, q: Query, profile: UserProfile | None, w: Ran
     return adj
 
 
+def _signature(c: Candidate) -> set[str]:
+    sig: set[str] = set()
+    for cat in c.categories:
+        sig.update(f"c:{t}" for t in _WORD_RE.findall(cat.lower()) if len(t) > 2)
+    sig.update(f"col:{x.lower()}" for x in c.colors)
+    if c.material:
+        sig.add(f"m:{c.material.lower()}")
+    if c.brand:
+        sig.add(f"b:{c.brand.lower()}")
+    if c.department:
+        sig.add(f"d:{c.department.lower()}")
+    sig.update(f"t:{t}" for t in _WORD_RE.findall(c.title.lower())[:8] if len(t) > 2)
+    return sig
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    return inter / (len(a) + len(b) - inter)
+
+
+def _mmr_order(ranked_desc: list[Candidate], top_k: int, *, lam: float = _MMR_LAMBDA) -> list[Candidate]:
+    pool = ranked_desc[:_MMR_POOL]
+    if len(pool) < _MMR_MIN_POOL or top_k <= 1:
+        return ranked_desc[:top_k]
+
+    rels = [max(0.0, c.rank_score if c.rank_score is not None else 0.0) for c in pool]
+    hi = max(rels) or 1.0
+    rel_norm = {id(c): r / hi for c, r in zip(pool, rels)}
+    sigs = {id(c): _signature(c) for c in pool}
+
+    selected = [pool[0]]
+    chosen = {id(pool[0])}
+    while len(selected) < min(top_k, len(pool)):
+        best, best_mmr = None, None
+        for c in pool:
+            if id(c) in chosen:
+                continue
+            div = max(_jaccard(sigs[id(c)], sigs[id(s)]) for s in selected)
+            mmr = lam * rel_norm[id(c)] - (1.0 - lam) * div
+            if best_mmr is None or mmr > best_mmr:
+                best, best_mmr = c, mmr
+        selected.append(best)
+        chosen.add(id(best))
+
+    if len(selected) < top_k:
+        selected.extend(ranked_desc[len(pool):top_k])
+    return selected
+
+
 def rank(
     candidates: list[Candidate],
     q: Query,
@@ -337,7 +393,12 @@ def rank(
         base = c.rank_score if c.rank_score is not None else 0.0
         c.rank_score = base + _soft_adjustment(c, q, profile, w)
 
-    ranked = sorted(ordered, key=lambda c: c.rank_score, reverse=True)[:top_k]
+    by_relevance = sorted(ordered, key=lambda c: c.rank_score, reverse=True)
+
+    if _track(q) == "browsing":
+        ranked = _mmr_order(by_relevance, top_k)
+    else:
+        ranked = by_relevance[:top_k]
 
     if len(ranked) >= 2:
         nxt = [c.rank_score for c in ranked[1:4]]

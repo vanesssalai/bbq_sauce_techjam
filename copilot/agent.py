@@ -18,6 +18,8 @@ from .dialog.state_machine import (
     note_clarification,
     record_shown,
 )
+from .models import CrossEncoder
+from .ranking.rank import rank
 from .retrieval.filters import apply_filters_with_relaxation
 from .retrieval.query import build_query
 
@@ -104,6 +106,7 @@ class Agent:
         self._intent_scorer = None
         self._sem_resolver = None
         self._nli = None
+        self._cross_encoder = None
 
     def _build_index(self) -> None:
         cursor = self.connection.cursor()
@@ -152,6 +155,12 @@ class Agent:
         except Exception:
             self._sem_resolver = None
         self._nli = ZeroShotNliScorer.maybe()
+        try:
+            ce = CrossEncoder()
+            ce.score("probe", ["probe"])
+            self._cross_encoder = ce
+        except Exception:
+            self._cross_encoder = None
 
     def reset(self, session_id: str, user_profile: dict) -> None:
         self._ensure_nlu_models()
@@ -239,7 +248,16 @@ class Agent:
         pool = [replace(self._catalog[a]) for a in pool_asins if a in self._catalog]
 
         survivors, relaxation = apply_filters_with_relaxation(pool, query.hard_slots, query.negations)
-        ranked = pool
+
+        rank_input = survivors or pool
+        if rank_input:
+            ranked = rank(
+                rank_input, query, state,
+                top_k=max(top_k * 5, 50),
+                cross_encoder=self._cross_encoder,
+            ).ranked
+        else:
+            ranked = pool
 
         unseen = [c for c in ranked if c.parent_asin not in state.shown_asins]
         ordered = unseen if len(unseen) >= top_k else unseen + [c for c in ranked if c.parent_asin in state.shown_asins]
