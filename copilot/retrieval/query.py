@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 
-from ..contracts import HARD_FILTER_ATTRS, SOFT_BOOST_ATTRS, ParsedTurn, SessionState, Slot
+from ..contracts import (
+    HARD_FILTER_ATTRS,
+    SOFT_BOOST_ATTRS,
+    ParsedTurn,
+    Query,
+    SessionState,
+    Slot,
+)
 from ..dialog.state_machine import active_slots, effective_confidence
 
 
@@ -34,20 +40,6 @@ _SKIP_HEAD = _STOPWORDS | {
     "clothing", "apparel", "clothes", "item", "items", "products", "product",
     "something", "anything", "stuff", "gear",
 }
-
-
-@dataclass
-class Query:
-    hard_slots: dict[str, Slot] = field(default_factory=dict) 
-    soft_slots: dict[str, Slot] = field(default_factory=dict)
-    negations: dict[str, list[str]] = field(default_factory=dict)
-    free_text: str = ""
-    category_anchor: str = "" 
-    intent_p_buying: float = 0.5 
-
-    @property
-    def is_empty(self) -> bool:
-        return not (self.free_text or self.hard_slots or self.soft_slots)
 
 
 def _category_anchor(session: SessionState) -> str:
