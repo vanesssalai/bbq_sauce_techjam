@@ -1,14 +1,3 @@
-"""Orchestrator agent: NLU -> state -> build_query -> retrieve -> rank -> reply.
-
-Wires the dialog layer (`dialog/*`) to the retrieval + reranking stack
-(`retrieval/*`, `ranking/rank.py`) per IMPLEMENTATION_HANDOFF §6 /
-RETRIEVAL_RERANK_BUILD_GUIDE §5.
-
-Every heavy dependency (bi-encoder, dense matrix, cross-encoder, the semantic
-NLU layers) is built lazily and degrades to `None` on failure, so the agent
-still returns a valid, fully-populated response with no models and no network.
-"""
-
 from __future__ import annotations
 
 import os
@@ -41,6 +30,12 @@ def _flag(name: str) -> bool:
 PRF_ON = _flag("COPILOT_PRF")
 TOURNAMENT_ON = _flag("COPILOT_TOURNAMENT")
 CE_OFF = _flag("COPILOT_NO_CROSS_ENCODER")
+
+
+try:
+    _RANK_TOPK = int(os.environ.get("COPILOT_RANK_TOPK", "200"))
+except ValueError:
+    _RANK_TOPK = 200
 
 _ASK_PRIORITY = ("feature", "material", "use_case", "color", "style", "budget", "size", "brand")
 _ASK_TEMPLATES = {
@@ -127,6 +122,18 @@ class Agent:
         self.indexes = RetrievalIndexes(bm25=bm25, dense=dense, encoder=encoder)
 
     def _build_optional_models(self) -> None:
+        if _flag("COPILOT_NO_NLU_MODELS"):
+            if not CE_OFF:
+                try:
+                    from .models import CrossEncoder
+
+                    ce = CrossEncoder()
+                    ce.score("probe", ["probe"])
+                    self.cross_encoder = ce
+                except Exception:
+                    self.cross_encoder = None
+            return
+
         shared = None
         if self.indexes is not None:
             try:
@@ -202,11 +209,14 @@ class Agent:
             prior_slots={k: s.value for k, s in state.slots.items()},
         )
 
+        if parsed.is_hard_reset and parsed.slots:
+            parsed = replace(parsed, is_hard_reset=False)
+
         if (parsed.is_override or parsed.is_hard_reset) and not state.has_pivoted:
             state.has_pivoted = True
             state.shown_asins.clear()
 
-        apply_turn(state, parsed)  # appends raw_history, merges slots, decay, reconciliation
+        apply_turn(state, parsed) 
 
         query = build_query(state, parsed)
         candidates = self._retrieve(query)
@@ -215,7 +225,7 @@ class Agent:
             candidates,
             query,
             state,
-            top_k=max(top_k * 3, 30),
+            top_k=max(top_k, _RANK_TOPK),
             cross_encoder=self.cross_encoder,
             weights=self.rank_weights,
             use_tournament=TOURNAMENT_ON and self.cross_encoder is not None,

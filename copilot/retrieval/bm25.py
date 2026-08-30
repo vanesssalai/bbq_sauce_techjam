@@ -9,6 +9,7 @@ rank position, not the scale.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -20,11 +21,19 @@ _STOPWORDS = {
     "that", "the", "this", "to", "want", "with", "would", "you", "looking",
 }
 
-# fts5 column order below; index 0 (parent_asin) is UNINDEXED. features/details
-# are weighted heaviest because the simulator discloses near-verbatim
-# features/details substrings.
-_COLUMNS = ("parent_asin", "title", "features", "details", "categories", "store", "description")
-_BM25_WEIGHTS = (0.0, 3.0, 6.0, 5.0, 2.0, 1.5, 1.0)
+_BASELINE = os.environ.get("COPILOT_BM25_BASELINE", "").strip().lower() in ("1", "on", "true", "yes")
+
+if _BASELINE:
+    _COLUMNS = ("parent_asin", "title", "categories", "features", "details", "store", "description")
+    _BM25_WEIGHTS = (0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0)
+    _TOKENIZER = "unicode61 remove_diacritics 2"
+    _TERM_CAP = 40
+else:
+    _COLUMNS = ("parent_asin", "title", "features", "details", "categories", "store", "description")
+    _BM25_WEIGHTS = (0.0, 3.0, 6.0, 5.0, 2.0, 1.5, 1.0)
+    _TOKENIZER = "porter unicode61 remove_diacritics 2"
+    _TERM_CAP = 0
+
 _FETCH_LIMIT = 800
 
 
@@ -54,10 +63,11 @@ class Bm25Index:
 
     def _build(self) -> None:
         cur = self._conn.cursor()
+        col_defs = ", ".join(
+            f"{c} UNINDEXED" if c == "parent_asin" else c for c in _COLUMNS
+        )
         cur.execute(
-            "CREATE VIRTUAL TABLE products USING fts5("
-            "parent_asin UNINDEXED, title, features, details, categories, store, description, "
-            "tokenize='porter unicode61 remove_diacritics 2')"
+            f"CREATE VIRTUAL TABLE products USING fts5({col_defs}, tokenize='{_TOKENIZER}')"
         )
         batch: list[tuple] = []
         with self.catalog_path.open(encoding="utf-8") as handle:
@@ -82,6 +92,8 @@ class Bm25Index:
         limit: int = 400,
     ) -> list[tuple[str, float]]:
         terms = list(dict.fromkeys(_terms(query_text)))
+        if _TERM_CAP:
+            terms = terms[:_TERM_CAP]
         if not terms:
             return []
         match_expr = " OR ".join(f'"{t}"' for t in terms)

@@ -7,17 +7,28 @@ against each other.
 
 from __future__ import annotations
 
+import os
+
 from copilot.contracts import HARD_FILTER_ATTRS, Query
 
 Channel = list[tuple[str, float]]
 
 
+def _envf(name: str, default: float) -> float:
+    try:
+        return float(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+_W_BM25_FLOOR = _envf("COPILOT_W_BM25_FLOOR", 0.80)
+_W_BM25_CEIL = _envf("COPILOT_W_BM25_CEIL", 0.92)
+
+
 def weights(query: Query) -> dict[str, float]:
-    """Per-turn blend weights. More hard slots or a stronger buying intent pushes
-    weight toward the lexical channel; browsing / vague turns lean dense."""
     hard = sum(1 for attr in query.slots if attr in HARD_FILTER_ATTRS)
-    w_bm25 = 0.35 + 0.12 * hard + 0.25 * (query.intent_p_buying - 0.5) * 2
-    w_bm25 = min(0.80, max(0.30, w_bm25))
+    w_bm25 = _W_BM25_FLOOR + 0.03 * hard + 0.05 * (query.intent_p_buying - 0.5) * 2
+    w_bm25 = min(_W_BM25_CEIL, max(_W_BM25_FLOOR, w_bm25))
     return {"bm25": w_bm25, "dense": 1.0 - w_bm25}
 
 
@@ -28,13 +39,6 @@ def fuse(
     k: int = 60,
     limit: int = 200,
 ) -> list[tuple[str, float]]:
-    """Merge `{channel_name: [(parent_asin, score), ...]}` (each best-first) into
-    one best-first `[(parent_asin, fused_score)]`, length <= `limit`.
-
-        fused[d] = Σ_channel  weight[c] / (k + rank_c(d))     # rank_c 1-indexed
-
-    A document absent from a channel contributes 0 for that channel.
-    """
     accumulated: dict[str, float] = {}
     for name, hits in channels.items():
         weight = channel_weights.get(name, 0.0)
