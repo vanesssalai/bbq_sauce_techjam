@@ -25,7 +25,7 @@ def _envi(name: str, default: int) -> int:
 
 
 _FILTER_RESTRICT = _flag("COPILOT_FILTER_RESTRICT")
-_NO_DENSE = _flag("COPILOT_NO_DENSE")
+_NO_DENSE = not _flag("COPILOT_USE_DENSE")
 _RETRIEVE_LIMIT = _envi("COPILOT_RETRIEVE_LIMIT", 400)
 
 

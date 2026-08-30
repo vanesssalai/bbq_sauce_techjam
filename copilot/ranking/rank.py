@@ -99,9 +99,9 @@ def rank(
         ranked = by_fused[:top_k]
     else:
         try:
-            N = int(os.environ.get("COPILOT_CE_TOP_N", "100"))
+            N = int(os.environ.get("COPILOT_CE_TOP_N", "30"))
         except ValueError:
-            N = 100
+            N = 30
         top_n = by_fused[:N]
         rest = by_fused[N:]
 
