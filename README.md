@@ -1,147 +1,86 @@
-# TechJam Conversational E-Commerce Search Challenge
+# TechJam Conversational Shopping Agent
 
-Build an AI shopping agent that asks useful follow-up questions and recommends the customer's hidden target product within at most 10 turns.
+A multi-turn shopping assistant for the TechJam Conversational E-Commerce Search
+Challenge. Each session it receives an anonymized preference profile and a short
+customer message, then has **10 turns** to surface the customer's hidden target
+product in a Top-10 list, asking clarifying questions along the way.
 
-## What You Receive
+## Project Overview
 
-- A frozen catalog of 50,000 products from the `Clothing_Shoes_and_Jewelry` category of Amazon Reviews 2023.
-- 200 labeled public sessions for local development.
-- A weak BM25 starter agent and deterministic local evaluator.
-- The Agent API contract and scoring rules.
+The pipeline, per turn:
 
-The organizer keeps 800 additional sessions private for final evaluation.
-
-## Task
-
-For each session, your agent receives an anonymized preference profile and a short customer message. Raw user IDs, review text, timestamps, and purchase history are never disclosed. On every turn the agent may:
-
-- ask a natural clarification question in `message` and identify one requested field in `ask_attribute`;
-- return a ranked list of up to 10 catalog `parent_asin` values;
-- do both in the same response.
-
-The session ends when the target product appears in the scored Top 10 or after turn 10. Sessions cover Buying, Browsing, Intent Override, and Boundary behavior.
-
-## Download the Catalog
-
-Download `catalog.jsonl.gz` from the GitHub Release attached to this repository, then run:
-
-```bash
-gzip -dk catalog.jsonl.gz
-mv catalog.jsonl data/catalog.jsonl
+```
+customer message
+  └─ dialog/nlu.py            rule-based slot + intent + disclosed-phrase extraction
+  └─ dialog/state_machine.py  merge/decay slots, accumulate disclosed phrases, track pivots
+  └─ retrieval/query.py       assemble one free_text string  (anchor + slots + disclosed phrases)
+  └─ retrieval/bm25.py        SQLite FTS5 BM25 over title/features/details/categories/store/description
+  └─ retrieval/retrieve.py    hydrate ~400 candidates (lexical only by default)
+  └─ ranking/rank.py          cross-encoder RRF-blend rerank of the top 30
+  └─ agent.py _order + _dialogue  dedupe, unseen-first, Top-10, pick the next question
 ```
 
-Verify the downloaded file using the published `SHA256SUMS` file.
+| choice | why |
+| --- | --- |
+| **Lexical (BM25) is the backbone**, dense retrieval **off** by default | the simulator discloses near-verbatim catalog `features`/`details` text, so exact term match wins; the bi-encoder adds noise (MRR −0.08, buying HR −0.08). |
+| **Ask up to 6 clarifying questions** (was 2) | the simulated customer volunteers almost nothing unprompted; every answer dumps near-verbatim feature text into the query. Capping at 2 left buying targets stuck at BM25 rank ~150. |
+| **Cross-encoder as an RRF *blend*, never the base** | raw `ms-marco-MiniLM` logits on a category-slot query render are miscalibrated; blending its rank with the retrieval rank (`1/(k+r_fused) + 1/(k+r_ce)`) lifts MRR +0.05 without hurting HR. |
+| **`rank()` returns a deep list (200), not 30** | `_order` walks down it across turns; a 30-item cap made every session go stale after turn 3. |
+| **Embedding semantic-slot resolver off** | it injected `style`/`use_case` guesses at a 0.42 cosine threshold and wrecked the sparse browsing queries (−0.22 Tech). |
+| **BM25 field weights: features/details heaviest**, `porter` stemming | matches what the customer discloses once the agent asks enough questions. |
 
-## Download the Models
+## Setup and Installation
 
-Hybrid retrieval needs two sentence-transformers checkpoints. They are **not**
-committed (`models/` is git-ignored); reconstruct them from the pinned commit
-revisions with:
-
-```bash
-python scripts/download_models.py            # -> models/, plus models/SHA256SUMS
-python scripts/download_models.py --verify   # re-hash local files against SHA256SUMS
-```
-
-| role | model | dir |
-| --- | --- | --- |
-| bi-encoder (dense) | `BAAI/bge-small-en-v1.5` | `models/bge-small-en-v1.5/` |
-| cross-encoder (rerank) | `cross-encoder/ms-marco-MiniLM-L-6-v2` | `models/ms-marco-MiniLM-L-6-v2/` |
-
-`copilot/models.py` loads from `models/` when present (no network) and otherwise
-falls back to a revision-pinned Hub download. **Official scoring may run with
-network disabled, so `models/` must be included in the final submission bundle.**
-
-## Build the Dense Index
-
-The dense retrieval channel reads a precomputed embedding matrix (one row per
-catalog product, aligned to catalog line order). It is **not** committed
-(`data/dense_embeddings.npy` / `data/embedding_meta.json` are git-ignored);
-rebuild it after `download_models.py`:
+Python **3.13** (3.10+ works; the pins target 3.13).
 
 ```bash
-python scripts/build_artifacts.py            # -> data/dense_embeddings.npy + embedding_meta.json
-python scripts/build_artifacts.py --verify   # check the artifact matches the current catalog
+pip install -r requirements.txt
+pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
 ```
 
-`embedding_meta.json` records the model revision and the catalog/embedding
-sha256s. If the artifact is missing, `DenseIndex` falls back to encoding the
-catalog at startup (slow). Include both files in the final submission bundle.
-
-## Run the Starter
-
-Python 3.10 or later is recommended. The starter uses only the Python standard library.
+**Catalog** — download `catalog.jsonl.gz` from the repo's GitHub Release, then:
 
 ```bash
-python3 -m evaluator.local_evaluator
+gzip -dk catalog.jsonl.gz && mv catalog.jsonl data/catalog.jsonl
 ```
 
-Edit `starter/agent.py` to implement your system. Do not edit the evaluator or public labels when reporting your local score.
-The command writes per-session results and aggregate metrics to `results.json`.
+**Models** — the cross-encoder is required (`models/` is git-ignored). Reconstruct
+from the pinned revisions:
 
-The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
-MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
+```bash
+python scripts/download_models.py
+
+python scripts/download_models.py --verify   # re-hash against models/SHA256SUMS
+```
+
+## Steps to Reproduce the Results
+
+From the repo root, with `data/catalog.jsonl` and `models/` in place:
+
+```bash
+python -m evaluator.local_evaluator
+```
 
 ## Agent Interface
 
 ```python
 class Agent:
-    def reset(self, session_id: str, user_profile: dict) -> None:
-        ...
-
+    def reset(self, session_id: str, user_profile: dict) -> None: ...
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
         return {
-            "message": "Do you have a material preference?",
-            "ask_attribute": "material",
-            "recommendations": [
-                {"parent_asin": "B000..."},
-                {"parent_asin": "B001..."}
-            ],
-            "usage": {"prompt_tokens": 120, "completion_tokens": 30}
+            "message": "Any material or fabric you're set on?",
+            "ask_attribute": "material",            # or one of: category color size style brand
+                                                     #            budget feature use_case other  / null
+            "recommendations": [{"parent_asin": "B000..."}, ...],   # up to 10
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
 ```
 
-`ask_attribute` is one of `category`, `material`, `color`, `size`, `style`, `brand`, `budget`, `feature`, `use_case`, `other`, or `null`. See `docs/agent_api_contract.json`.
-
-## Technical Metrics
-
-- **Hit Rate@10:** fraction of sessions that find the target within 10 turns.
-- **MRR:** mean reciprocal rank of the target; a miss contributes zero.
-- **MTTC:** mean first-hit turn; a miss is assigned turn 11.
-- **Reported token usage:** prompt and completion tokens returned by the team's model client.
-
-```text
-TechnicalScore = 0.50 × HitRate@10 + 0.30 × MRR + 0.20 × Efficiency
-Efficiency = clip((11 - MTTC) / 10, 0, 1)
-```
-
-Only exact `parent_asin` equality produces a hit. Core metrics are also reported by scenario.
-
-## Model Choice and Cost
-
-Teams may use any legally accessible LLM API or local model. Teams manage their own credentials and must never commit API keys. Model choice, estimated cost, token usage, and latency must be disclosed. Token usage is a feasibility metric, not part of the core technical score. The organizer may reimburse model costs through prizes instead of issuing API keys.
-
-## Files
-
-```text
-data/public_set.jsonl             200 labeled development sessions
-docs/competition_specification.md participant rules and evaluation protocol
-docs/agent_api_contract.json      machine-readable Agent contract
-docs/evaluation_config.json       scoring configuration
-docs/baseline_results.json        reproducible weak-starter reference score
-starter/agent.py                  editable weak starter
-evaluator/local_evaluator.py      public-set simulator and scorer
-```
-
-## Judging and Submission Policy
-
-- Participant submission requirements: `docs/submission_rules.md`
-- Participant release checklist: `docs/participant_release_checklist.md`
-- Organizer-only final judging controls: `organizer/JUDGING_RUNBOOK.md`
-- Organizer private release checklist: `organizer/private_release_checklist.md`
-- Judging day operations SOP: `organizer/JUDGING_DAY_SOP.md`
+The session ends when the target `parent_asin` appears in the Top 10 or after
+turn 10. See `docs/agent_api_contract.json`.
 
 ## Data Source
 
-The catalog and sessions are derived from Amazon Reviews 2023 by McAuley Lab, UCSD. See `DATA_ATTRIBUTION.md` before using or redistributing the data.
-Sessions are sampled deterministically from the official Clothing 5-core leave-last-out split and joined to the frozen catalog.
+Catalog and sessions are derived from Amazon Reviews 2023 (McAuley Lab, UCSD),
+Clothing/Shoes/Jewelry 5-core leave-last-out split. See `DATA_ATTRIBUTION.md`
+before using or redistributing the data.
