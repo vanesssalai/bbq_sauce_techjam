@@ -1,7 +1,42 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
+
+
+def _pick_device() -> str:
+    forced = os.environ.get("COPILOT_DEVICE", "").strip().lower()
+    if forced in ("cpu", "cuda", "mps"):
+        return forced
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available():
+            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+            try:
+                torch.ones(1, device="mps")
+                return "mps"
+            except Exception:
+                return "cpu"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def _construct(factory, source: str, device: str, **kwargs):
+    try:
+        return factory(source, device=device, **kwargs), device
+    except Exception:
+        if device == "cpu":
+            raise
+        return factory(source, device="cpu", **kwargs), "cpu"
+
+
+_GPU_BATCH = 128
 
 BI_ENCODER_NAME = "BAAI/bge-small-en-v1.5"
 BI_ENCODER_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
@@ -59,7 +94,7 @@ class Encoder:
 class BiEncoder:
     def __init__(self, name: str = BI_ENCODER_NAME, device: str | None = None) -> None:
         self.name = name
-        self.device = device
+        self.device = device or _pick_device()
         self._model = None
         if name == BI_ENCODER_NAME:
             self.source, self.is_local = _resolve(name, BI_ENCODER_DIRNAME)
@@ -70,10 +105,12 @@ class BiEncoder:
         if self._model is None:
             from sentence_transformers import SentenceTransformer
 
-            kwargs: dict = {"device": self.device}
+            kwargs: dict = {}
             if not self.is_local:
                 kwargs["revision"] = BI_ENCODER_REVISION
-            self._model = SentenceTransformer(self.source, **kwargs)
+            self._model, self.device = _construct(
+                SentenceTransformer, self.source, self.device, **kwargs
+            )
         return self._model
 
     def encode(
@@ -81,7 +118,7 @@ class BiEncoder:
         texts,
         *,
         is_query: bool = False,
-        batch_size: int = 64,
+        batch_size: int | None = None,
         normalize: bool = True,
     ):
         import numpy as np
@@ -92,9 +129,11 @@ class BiEncoder:
             return np.zeros((0, self.dim), dtype="float32")
         if is_query:
             items = [BI_ENCODER_QUERY_PREFIX + t for t in items]
-        vecs = self._load().encode(
+        model = self._load()
+        bs = batch_size or (_GPU_BATCH if self.device in ("cuda", "mps") else 64)
+        vecs = model.encode(
             items,
-            batch_size=batch_size,
+            batch_size=bs,
             convert_to_numpy=True,
             normalize_embeddings=normalize,
             show_progress_bar=False,
@@ -115,7 +154,7 @@ class CrossEncoder:
         max_length: int = 512,
     ) -> None:
         self.name = name
-        self.device = device
+        self.device = device or _pick_device()
         self.max_length = max_length
         self._model = None
         if name == CROSS_ENCODER_NAME:
@@ -127,21 +166,25 @@ class CrossEncoder:
         if self._model is None:
             from sentence_transformers import CrossEncoder as _STCrossEncoder
 
-            kwargs: dict = {"device": self.device, "max_length": self.max_length}
+            kwargs: dict = {"max_length": self.max_length}
             if not self.is_local:
                 kwargs["revision"] = CROSS_ENCODER_REVISION
-            self._model = _STCrossEncoder(self.source, **kwargs)
+            self._model, self.device = _construct(
+                _STCrossEncoder, self.source, self.device, **kwargs
+            )
         return self._model
 
-    def score(self, query: str, docs, batch_size: int = 32):
+    def score(self, query: str, docs, batch_size: int | None = None):
         import numpy as np
 
         docs = list(docs)
         if not docs:
             return np.zeros(0, dtype="float32")
-        scores = self._load().predict(
+        model = self._load()
+        bs = batch_size or (_GPU_BATCH if self.device in ("cuda", "mps") else 32)
+        scores = model.predict(
             [(query, doc) for doc in docs],
-            batch_size=batch_size,
+            batch_size=bs,
             show_progress_bar=False,
         )
         return np.asarray(scores, dtype="float32")
@@ -151,7 +194,7 @@ class NliCrossEncoder:
 
     def __init__(self, name: str = NLI_ENCODER_NAME, device: str | None = None) -> None:
         self.name = name
-        self.device = device
+        self.device = device or _pick_device()
         self._model = None
         if name == NLI_ENCODER_NAME:
             self.source, self.is_local = _resolve(name, NLI_ENCODER_DIRNAME)
@@ -162,17 +205,21 @@ class NliCrossEncoder:
         if self._model is None:
             from sentence_transformers import CrossEncoder as _STCrossEncoder
 
-            kwargs: dict = {"device": self.device}
+            kwargs: dict = {}
             if not self.is_local and NLI_ENCODER_REVISION:
                 kwargs["revision"] = NLI_ENCODER_REVISION
-            self._model = _STCrossEncoder(self.source, **kwargs)
+            self._model, self.device = _construct(
+                _STCrossEncoder, self.source, self.device, **kwargs
+            )
         return self._model
 
-    def entails_batch(self, pairs, batch_size: int = 32) -> list[float]:
+    def entails_batch(self, pairs, batch_size: int | None = None) -> list[float]:
         pairs = list(pairs)
         if not pairs:
             return []
-        raw = self._load().predict(list(pairs), batch_size=batch_size, show_progress_bar=False)
+        model = self._load()
+        bs = batch_size or (_GPU_BATCH if self.device in ("cuda", "mps") else 32)
+        raw = model.predict(list(pairs), batch_size=bs, show_progress_bar=False)
         rows = raw.tolist() if hasattr(raw, "tolist") else list(raw)
         out: list[float] = []
         for row in rows:
