@@ -118,9 +118,7 @@ class SessionState:
     raw_history: list[tuple[str, str]] = field(default_factory=list)
     shown_asins: set[str] = field(default_factory=set)
     no_preference: set[str] = field(default_factory=set)
-    disclosed_phrases: list[str] = field(default_factory=list)
     clarify_count: int = 0
-    intent_p_buying: float = 0.5
     pending_relaxation: tuple[str, str | None] | None = None
 
 @dataclass
@@ -142,24 +140,7 @@ class TurnResult:
         }
 
 @dataclass
-<<<<<<< HEAD
 class RankResult:
     ranked: list[Candidate]              # best-first, len <= top_k, each with rank_score set
     score_gap: float                     # rank_score[0] - mean(rank_score[1:4]); 0.0 if <2 results
     why: dict[str, str]                  # {parent_asin: "leather ✓ · under $50 ✓"} for the top ~3
-=======
-class Query:
-    free_text: str
-    slots: dict[str, Slot]
-    negations: dict[str, list[str]]
-    intent_p_buying: float
-    track: Literal["buying", "browsing"]
-    turn: int
-    dense_vec_override: list[float] | None = None
-
-@dataclass
-class RankResult:
-    ranked: list[Candidate]
-    score_gap: float
-    why: dict[str, str]
->>>>>>> a2f8e915626ba38da1bcbeea66253f07b3ab2de5

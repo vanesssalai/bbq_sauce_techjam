@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..contracts import Candidate, HARD_FILTER_ATTRS, Slot
+from ..contracts import Candidate, HARD_FILTER_ATTRS, Query, Slot
 
 _PRICE_OVER_TOLERANCE = 2.0   
 _PRICE_UNDER_TOLERANCE = 0.3 
