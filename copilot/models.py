@@ -118,7 +118,7 @@ class BiEncoder:
         texts,
         *,
         is_query: bool = False,
-        batch_size: int | None = None,
+        batch_size: int = 64,
         normalize: bool = True,
     ):
         import numpy as np

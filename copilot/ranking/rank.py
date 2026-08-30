@@ -1,6 +1,26 @@
 from __future__ import annotations
 
+import os
+
 from copilot.contracts import Candidate, Query, RankResult, SessionState
+
+
+def _flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "on", "true", "yes")
+
+
+# Return the retrieval (fused) order untouched -- no cross-encoder, no
+# tournament. Mirrors test2's `ranked = pool`.
+_PASSTHROUGH = _flag("COPILOT_RANK_PASSTHROUGH")
+# Blend the cross-encoder ordering with the fused (retrieval) ordering via RRF,
+# so a miscalibrated MS-MARCO logit can nudge but not overwrite the pool order.
+# On by default; COPILOT_CE_BASE=1 restores the raw min-max base.
+_CE_BLEND = not _flag("COPILOT_CE_BASE")
+_CE_BLEND_K = 60
+try:
+    _CE_BLEND_W = float(os.environ.get("COPILOT_CE_BLEND_W", "1.0"))
+except ValueError:
+    _CE_BLEND_W = 1.0
 
 
 def _build_ce_query(q: Query) -> str:
@@ -77,17 +97,17 @@ def rank(
     weights=None,
     use_tournament: bool = False,
 ) -> RankResult:
-    # Work on a stable order by fused_rank/fused_score first.
+    # Work on a stable order by fused_rank first.
     by_fused = sorted(
         candidates,
-        key=lambda c: c.fused_score if c.fused_score is not None else 0.0,
-        reverse=True,
+        key=lambda c: (c.fused_rank if c.fused_rank is not None else 10**9,
+                       -(c.fused_score if c.fused_score is not None else 0.0)),
     )
 
-    if cross_encoder is None:
-        # Degraded mode: no cross-encoder available, base = fused_score.
-        for c in by_fused:
-            c.rank_score = c.fused_score if c.fused_score is not None else 0.0
+    if _PASSTHROUGH or cross_encoder is None:
+        for i, c in enumerate(by_fused):
+            c.rank_score = 1.0 / (1 + i)
+        ranked = by_fused[:top_k]
     else:
         # 7a: cross-encoder rerank over the top N by fused_rank.
         N = 100
@@ -96,32 +116,40 @@ def rank(
 
         ce_query = _build_ce_query(q)
         doc_texts = [_ce_doc_text(c) for c in top_n]
-        ce_scores = cross_encoder.score(ce_query, doc_texts)
+        ce_scores = list(cross_encoder.score(ce_query, doc_texts))
 
-        # min-max normalize over N -> base in [0, 1]
-        if len(ce_scores) > 0:
-            lo, hi = float(min(ce_scores)), float(max(ce_scores))
-            span = hi - lo
-            for c, raw in zip(top_n, ce_scores):
-                c.rank_score = (float(raw) - lo) / span if span > 0 else 0.5
-        for c in rest:
-            c.rank_score = c.fused_score if c.fused_score is not None else 0.0
+        if len(ce_scores) == len(top_n) and top_n:
+            if _CE_BLEND:
+                order = sorted(range(len(top_n)), key=lambda j: -float(ce_scores[j]))
+                ce_rank = {j: pos + 1 for pos, j in enumerate(order)}
+                for j, c in enumerate(top_n):
+                    fr = c.fused_rank if c.fused_rank is not None else j + 1
+                    c.rank_score = (1.0 / (_CE_BLEND_K + fr)
+                                    + _CE_BLEND_W / (_CE_BLEND_K + ce_rank[j]))
+            else:
+                lo, hi = float(min(ce_scores)), float(max(ce_scores))
+                span = hi - lo
+                for c, raw in zip(top_n, ce_scores):
+                    c.rank_score = (float(raw) - lo) / span if span > 0 else 0.5
+        else:  # CE failed / wrong length -> fall back to fused order
+            for i, c in enumerate(top_n):
+                c.rank_score = 1.0 / (1 + i)
 
+        head_lo = min((c.rank_score for c in top_n), default=0.0)
+        for i, c in enumerate(rest):
+            c.rank_score = head_lo - 1e-3 * (i + 1)
         by_fused = top_n + rest
 
         # 7b: tournament head over the top M=20, only if a cross-encoder ran.
         if use_tournament:
             M = 20
-            top_m = by_fused[:M]
-            rest_after_m = by_fused[M:]
-            reordered_top_m = _copeland_tournament(top_m)
-            by_fused = reordered_top_m + rest_after_m
+            by_fused = _copeland_tournament(by_fused[:M]) + by_fused[M:]
 
-    if use_tournament and cross_encoder is not None:
-        # Preserve the tournament's Copeland order for the top M; rest stays fused/ce order.
-        ranked = by_fused[:top_k]
-    else:
-        ranked = sorted(by_fused, key=lambda c: c.rank_score, reverse=True)[:top_k]
+    if not (_PASSTHROUGH or cross_encoder is None):
+        if use_tournament:
+            ranked = by_fused[:top_k]
+        else:
+            ranked = sorted(by_fused, key=lambda c: c.rank_score, reverse=True)[:top_k]
 
     if len(ranked) >= 2:
         top = ranked[0].rank_score
