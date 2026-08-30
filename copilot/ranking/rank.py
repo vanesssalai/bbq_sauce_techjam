@@ -115,12 +115,6 @@ def _active_rankings(candidates: list[Candidate]) -> list[dict[str, int]]:
 
 
 def _copeland_tournament(candidates: list[Candidate]) -> list[Candidate]:
-    """Copeland rank-aggregation (handoff §6, ranking method ③). Raw CE logits
-    are poorly calibrated, so aggregate the orderings already in hand
-    ({bm25, dense, fused, ce} ranks that carry signal). Each pair (a, b) is a
-    pairwise-majority contest -- `a` wins it when more of the active rankings put
-    `a` above `b`; `copeland(a) = wins − losses`. Re-sort by that, ties broken by
-    the cross-encoder score. Zero extra model calls."""
     rankings = _active_rankings(candidates)
     if not rankings:
         return list(candidates)
