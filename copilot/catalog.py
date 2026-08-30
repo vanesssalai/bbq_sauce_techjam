@@ -176,6 +176,14 @@ def _build_attribute_scan_text(row: dict[str, Any], title: str) -> str:
     return " ".join([title, *features]).strip()
 
 
+def dense_text(row: dict[str, Any]) -> str:
+    """Text embedded for dense retrieval. Identical to `Candidate.search_text` so
+    that `scripts/build_artifacts.py` precomputes exactly what
+    `DenseIndex.build()` would encode at startup."""
+    title = str(row.get("title") or "").strip()
+    return _build_search_text(row, title)
+
+
 def normalize_row(row: dict[str, Any]) -> Candidate | None:
     parent_asin = row.get("parent_asin")
     if not parent_asin:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..contracts import Candidate, HARD_FILTER_ATTRS, Slot
+from ..contracts import Candidate, HARD_FILTER_ATTRS, Query, Slot
 
 _PRICE_OVER_TOLERANCE = 2.0   
 _PRICE_UNDER_TOLERANCE = 0.3 
@@ -96,7 +96,6 @@ def apply_filters(
 def suggest_relaxation(
     candidates: list[Candidate], slots: dict[str, Slot]
 ) -> tuple[str, str | None] | None:
-
     active = {attr: slot.value for attr, slot in slots.items() if attr in HARD_FILTER_ATTRS}
     if not active:
         return None
@@ -135,3 +134,7 @@ def apply_filters_with_relaxation(
     if survivors:
         return survivors, None
     return survivors, suggest_relaxation(candidates, slots)
+
+
+def filter_for_query(candidates: list[Candidate], query: Query) -> list[Candidate]:
+    return apply_filters(candidates, query.slots, query.negations)
