@@ -83,13 +83,28 @@ class ParsedTurn:
 
 @dataclass
 class Query:
-    free_text: str                       # the SAME string fed to BM25 MATCH and to the dense encoder
-    slots: dict[str, Slot]               # active_slots(session); filters/rank pick what they need
-    negations: dict[str, list[str]]      # {attr: [values]} — never enters free_text
-    intent_p_buying: float               # 0..1 — drives fusion weights + MMR on/off
-    track: Literal["buying", "browsing"]
-    turn: int
-    dense_vec_override: list[float] | None = None   # set by PRF; dense.search uses it instead of encoding
+    """Structured hand-off from the dialog layer to retrieval + rank.
+
+    Superset of the two contracts that grew on parallel branches: retrieval
+    (`retrieve`/`fusion`/`dense`/`prf`) reads `slots` + `track` + `turn`; the
+    reranker (`ranking.rank`) reads the typed `hard_slots` / `soft_slots` /
+    `category_anchor`. `build_query()` populates all of them.
+    """
+
+    free_text: str = ""                              # SAME string fed to BM25 MATCH and the dense encoder
+    slots: dict[str, Slot] = field(default_factory=dict)        # every active (post-decay) slot; filters + fusion
+    hard_slots: dict[str, Slot] = field(default_factory=dict)   # source-gated, hard-filterable subset; rank features
+    soft_slots: dict[str, Slot] = field(default_factory=dict)   # color / material / brand; rank boosts only
+    negations: dict[str, list[str]] = field(default_factory=dict)  # {attr: [values]} — never enters free_text
+    category_anchor: str = ""                         # verbatim turn-1 category phrase; rank feature
+    intent_p_buying: float = 0.5                      # 0..1 — drives fusion weights + MMR on/off
+    track: Literal["buying", "browsing"] = "browsing"
+    turn: int = 0
+    dense_vec_override: list[float] | None = None     # set by PRF; dense.search uses it instead of encoding
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.free_text or self.slots or self.hard_slots or self.soft_slots)
 
 @dataclass
 class UserProfile:
@@ -138,20 +153,6 @@ class TurnResult:
             ],
             "usage": self.usage,
         }
-
-@dataclass
-class Query:
-    hard_slots: dict[str, Slot] = field(default_factory=dict)
-    soft_slots: dict[str, Slot] = field(default_factory=dict)
-    negations: dict[str, list[str]] = field(default_factory=dict)
-    free_text: str = "" 
-    category_anchor: str = "" 
-    intent_p_buying: float = 0.5
-    dense_vec_override: list[float] | None = None
-
-    @property
-    def is_empty(self) -> bool:
-        return not (self.free_text or self.hard_slots or self.soft_slots)
 
 @dataclass
 class RankResult:

@@ -105,10 +105,15 @@ def build_query(session: SessionState, parsed: ParsedTurn | None = None) -> Quer
         "buying" if session.intent_p_buying >= 0.5 else "browsing"
     )
 
+    hard_slots = {a: s for a, s in slots.items() if a in HARD_FILTER_ATTRS}
+
     return Query(
         free_text=free_text,
         slots=slots,
+        hard_slots=hard_slots,
+        soft_slots=soft_slots,
         negations=negations,
+        category_anchor=anchor,
         intent_p_buying=session.intent_p_buying,
         track=track,
         turn=session.turn,

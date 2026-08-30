@@ -13,9 +13,6 @@ from .dialog.state_machine import (
     record_shown,
     should_ask,
 )
-from .models import CrossEncoder
-from .ranking.rank import rank
-from .retrieval.filters import apply_filters_with_relaxation
 from .ranking.rank import rank
 from .retrieval import retrieve as _retrieve_mod
 from .retrieval.query import build_query
@@ -87,9 +84,9 @@ class Agent:
         self._intent_scorer = None
         self._sem_resolver = None
         self._nli = None
-        self._cross_encoder = None
         self._models_ready = False
         self._last_relaxation: tuple[str, str | None] | None = None
+        self._last_score_gap: float = 0.0
 
         self._sessions: dict[str, SessionState] = {}
 
@@ -204,6 +201,9 @@ class Agent:
         query = build_query(state, parsed)
         candidates = self._retrieve(query)
 
+        # retrieve() already applied the hard filter (survivors -> allowed_ids, or
+        # the whole catalog + a relaxation hint when the filter wiped the pool),
+        # so `candidates` is the reranker's input directly.
         result = rank(
             candidates,
             query,
@@ -214,23 +214,10 @@ class Agent:
             use_tournament=TOURNAMENT_ON and self.cross_encoder is not None,
         )
 
-        survivors, relaxation = apply_filters_with_relaxation(pool, query.hard_slots, query.negations)
-
-        rank_input = survivors or pool
-        if rank_input:
-            ranked = rank(
-                rank_input, query, state,
-                top_k=max(top_k * 5, 50),
-                cross_encoder=self._cross_encoder,
-            ).ranked
-        else:
-            ranked = pool
-
-        unseen = [c for c in ranked if c.parent_asin not in state.shown_asins]
-        ordered = unseen if len(unseen) >= top_k else unseen + [c for c in ranked if c.parent_asin in state.shown_asins]
-        recommendations = [{"parent_asin": c.parent_asin} for c in ordered[:top_k]]
+        recommendations = self._order(result.ranked, state, top_k)
         record_shown(state, [r["parent_asin"] for r in recommendations])
 
+        self._last_score_gap = result.score_gap
         message, ask_attribute = self._dialogue(state, parsed, turn)
         return {
             "message": message,

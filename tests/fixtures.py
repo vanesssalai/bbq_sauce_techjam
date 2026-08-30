@@ -72,6 +72,16 @@ def make_fixture_candidates() -> list[Candidate]:
     ]
 
 
+# Back-compat aliases used by tests/test_skeletons.py
+TARGET_ASIN = "A6"
+
+
+def fused_candidates() -> list[Candidate]:
+    """Fresh copies of the fixture pool on every call (each `Candidate` is newly
+    constructed, so `rank_score` written by one test never leaks into the next)."""
+    return make_fixture_candidates()
+
+
 def make_fixture_query(**overrides) -> Query:
     defaults = dict(
         free_text="leather ankle boots",

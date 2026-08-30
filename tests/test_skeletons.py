@@ -1,5 +1,5 @@
-"""Smoke tests: modules import, new contract types exist, fixtures are well formed,
-skeletons raise NotImplementedError.
+"""Smoke tests: modules import, contract types exist, fixtures are well formed,
+and the wired retrieval->rank contract holds on the fixture pool.
 
 Run with `pytest -q` or directly: `python tests/test_skeletons.py`.
 """
@@ -50,21 +50,41 @@ def test_fixture_pool_shape():
     assert fused_candidates()[0].rank_score is None  # fresh copy each call
 
 
-def test_skeletons_raise_not_implemented():
-    # Track R (§4a, incl. PRF) is implemented; what remains a skeleton is Track K.
-    from copilot.dialog.distill import distill
-    from copilot.ranking.rank import rank
+def test_query_contract_is_unified():
+    # The two parallel-branch Query shapes were merged into one superset; both
+    # the retrieval fields and the rerank fields must be constructible together.
+    from copilot.contracts import Query
 
-    calls = [
-        lambda: rank(None, []),
-        lambda: distill(None),
-    ]
-    for call in calls:
-        try:
-            call()
-        except NotImplementedError:
-            continue
-        raise AssertionError("expected NotImplementedError")
+    q = Query(
+        free_text="leather boots", slots={}, hard_slots={}, soft_slots={},
+        negations={}, category_anchor="boots", intent_p_buying=0.8,
+        track="buying", turn=1,
+    )
+    assert q.is_empty is False
+
+
+def test_rank_smoke_on_fixture_pool():
+    # rank() is fully implemented now (Track K). Degraded mode (no cross-encoder)
+    # must still return a valid RankResult from the fixture pool.
+    from copilot.contracts import RankResult
+    from copilot.ranking.rank import rank
+    from tests.fixtures import fused_candidates, make_fixture_query, make_fixture_session
+
+    res = rank(
+        fused_candidates(), make_fixture_query(), make_fixture_session(),
+        top_k=3, cross_encoder=None,
+    )
+    assert isinstance(res, RankResult)
+    assert len(res.ranked) == 3
+    assert all(c.rank_score is not None for c in res.ranked)
+    assert len({c.parent_asin for c in res.ranked}) == 3
+
+
+def test_profile_calib_importable():
+    from copilot.dialog.distill import profile_calib
+    from tests.fixtures import fused_candidates
+
+    assert profile_calib(fused_candidates()[0], None) == 0.0
 
 
 if __name__ == "__main__":
