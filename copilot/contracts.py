@@ -131,16 +131,20 @@ class TurnResult:
 
 @dataclass
 class Query:
-    free_text: str
-    slots: dict[str, Slot]
-    negations: dict[str, list[str]]
-    intent_p_buying: float
-    track: Literal["buying", "browsing"]
-    turn: int
-    dense_vec_override: list[float] | None = None
+    hard_slots: dict[str, Slot] = field(default_factory=dict)   # user-STATED, filterable
+    soft_slots: dict[str, Slot] = field(default_factory=dict)   # colour/material/brand -- rerank boosts only
+    negations: dict[str, list[str]] = field(default_factory=dict)   # attr -> excluded values
+    free_text: str = ""                              # the SAME string fed to BM25 MATCH and the dense encoder
+    category_anchor: str = ""                        # verbatim turn-1 category phrase
+    intent_p_buying: float = 0.5                     # 0..1 EMA; high -> buyer/precision, low -> browser/diversify
+    dense_vec_override: list[float] | None = None    # set by PRF (Rocchio); dense.search uses it instead of encoding
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.free_text or self.hard_slots or self.soft_slots)
 
 @dataclass
 class RankResult:
-    ranked: list[Candidate]
+    ranked: list[Candidate] 
     score_gap: float
-    why: dict[str, str]
+    why: dict[str, str] 

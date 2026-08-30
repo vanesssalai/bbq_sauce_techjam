@@ -1,14 +1,57 @@
 from __future__ import annotations
 
-from ..contracts import Candidate, Query, RankResult, SessionState
+import json
+import math
+import re
+from dataclasses import dataclass, fields
+from pathlib import Path
+
+from ..contracts import Candidate, Query, RankResult, SessionState, UserProfile
+from ..dialog.distill import profile_calib
+from ..retrieval.filters import _violates_negation  # reuse: colour/material/brand exclusion
 
 _CE_TOP_N = 100
-_CE_DOC_MAX_TOKENS = 60 
+_CE_DOC_MAX_TOKENS = 60
 
-_BELOW_BAND = -1.0 
+_BELOW_BAND = -1.0
 
 _TOURNAMENT_TOP_M = 20
-_BT_ITERS = 60   
+_BT_ITERS = 60
+
+_PRICE_OVER_HARD = 2.0 
+_NEGATION_PENALTY = 5.0 
+_RATING_SATURATION = math.log1p(3000) 
+
+
+@dataclass
+class RankWeights:
+    price_tier: float = 0.15
+    category: float = 0.12
+    soft_slot: float = 0.08
+    tag_overlap: float = 0.05
+    rating: float = 0.05
+
+
+_WEIGHTS_PATH = Path(__file__).with_name("ranker_weights.json")
+_DEFAULT_WEIGHTS: RankWeights | None = None
+
+
+def load_rank_weights(path: Path | str | None = None) -> RankWeights:
+    p = Path(path) if path is not None else _WEIGHTS_PATH
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        allowed = {f.name for f in fields(RankWeights)}
+        return RankWeights(**{k: float(v) for k, v in data.items() if k in allowed})
+    except Exception:
+        return RankWeights()
+
+
+def _default_weights() -> RankWeights:
+    global _DEFAULT_WEIGHTS
+    if _DEFAULT_WEIGHTS is None:
+        _DEFAULT_WEIGHTS = load_rank_weights()
+    return _DEFAULT_WEIGHTS
+
 
 def _track(q: Query) -> str:
     return "buying" if q.intent_p_buying >= 0.5 else "browsing"
@@ -33,9 +76,9 @@ def _ce_doc_text(c: Candidate) -> str:
     return text
 
 
-def _ranks_by(candidates: list[Candidate], key) -> dict[str, int]:
-    """1-indexed rank of each candidate by descending key value."""
-    ordered = sorted(candidates, key=key, reverse=True)
+def _ranks_by(candidates: list[Candidate], key, *, reverse: bool = True) -> dict[str, int]:
+    """1-indexed rank of each candidate by `key` (default: descending = higher better)."""
+    ordered = sorted(candidates, key=key, reverse=reverse)
     return {c.parent_asin: i + 1 for i, c in enumerate(ordered)}
 
 
@@ -162,6 +205,87 @@ def _bradley_terry(candidates: list[Candidate], q: Query, cross_encoder) -> list
     return sorted(candidates, key=lambda c: strength[c.parent_asin], reverse=True)
 
 
+def _num(slot) -> float | None:
+    try:
+        return float(slot.value)
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _price_tier_bonus(c: Candidate, q: Query) -> float:
+    if c.price is None:
+        return 0.0
+    lo = _num(q.hard_slots.get("price_min"))
+    hi = _num(q.hard_slots.get("price_max"))
+    if hi is not None and hi > 0:
+        if c.price > hi:
+            over = (c.price - hi) / (hi * (_PRICE_OVER_HARD - 1.0))
+            return -min(1.0, over)
+    if lo is not None and lo > 0 and c.price < lo:
+        return -min(1.0, (lo - c.price) / lo)
+    return 1.0 if (hi is not None or lo is not None) else 0.0
+
+
+def _category_match(c: Candidate, q: Query) -> float:
+    hay = " ".join(c.categories).lower()
+    dept = (c.department or "").lower()
+    probes = [q.category_anchor] + [
+        q.hard_slots[k].value for k in ("category", "department") if k in q.hard_slots
+    ]
+    for probe in (str(p).lower().strip() for p in probes if p):
+        toks = [t for t in probe.split() if len(t) > 2]
+        if hay and (probe in hay or (toks and all(t in hay for t in toks))):
+            return 1.0
+        if dept and (probe == dept or probe in dept or dept in probe):
+            return 1.0
+    return 0.0
+
+
+def _soft_slot_match(c: Candidate, q: Query) -> float:
+    if not q.soft_slots:
+        return 0.0
+    hits = 0
+    for attr, slot in q.soft_slots.items():
+        v = str(slot.value).lower()
+        if attr == "color":
+            if any(v == x.lower() or v in x.lower() or x.lower() in v for x in c.colors):
+                hits += 1
+        elif attr == "material" and c.material and (v in c.material.lower() or c.material.lower() in v):
+            hits += 1
+        elif attr == "brand" and c.brand and (v in c.brand.lower() or c.brand.lower() in v):
+            hits += 1
+    return hits / len(q.soft_slots)
+
+
+def _tag_overlap(c: Candidate, profile: UserProfile | None) -> float:
+    if profile is None or not profile.preference_tags:
+        return 0.0
+    hay = set(_WORD_RE.findall(f"{c.title} {c.search_text}".lower()))
+    hits = sum(1 for t in profile.preference_tags if t.lower() in hay)
+    return min(hits, 3) / 3.0
+
+
+def _rating_prior(c: Candidate) -> float:
+    if c.rating_number <= 0 or c.average_rating <= 0:
+        return 0.0
+    volume = min(1.0, math.log1p(c.rating_number) / _RATING_SATURATION)
+    return volume * (c.average_rating / 5.0)
+
+
+def _soft_adjustment(c: Candidate, q: Query, profile: UserProfile | None, w: RankWeights) -> float:
+    adj = (
+        w.price_tier * _price_tier_bonus(c, q)
+        + w.category * _category_match(c, q)
+        + w.soft_slot * _soft_slot_match(c, q)
+        + w.tag_overlap * _tag_overlap(c, profile)
+        + w.rating * _rating_prior(c)
+        + profile_calib(c, profile)
+    )
+    if q.negations and _violates_negation(c, q.negations):
+        adj -= _NEGATION_PENALTY
+    return adj
+
+
 def rank(
     candidates: list[Candidate],
     q: Query,
@@ -169,7 +293,7 @@ def rank(
     *,
     top_k: int,
     cross_encoder=None,
-    weights=None,
+    weights: RankWeights | None = None,
     use_tournament: bool = False,
     tournament_method: str = "copeland",
 ) -> RankResult:
@@ -198,17 +322,28 @@ def rank(
         for i, c in enumerate(ordered):
             c.rank_score = c.fused_score if c.fused_score is not None else _BELOW_BAND - i
 
-    if use_tournament and ce_ran:
+    if use_tournament and ce_ran and len(ordered) > 1:
         m = min(_TOURNAMENT_TOP_M, len(ordered))
-        head_m = ordered[:m]
-        if tournament_method == "bradley_terry":
-            head_m = _bradley_terry(head_m, q, cross_encoder)
-        else:
-            head_m = _copeland_tournament(head_m)
-        ordered = head_m + ordered[m:]
-        ranked = ordered[:top_k]
-    else:
-        ranked = sorted(ordered, key=lambda c: c.rank_score, reverse=True)[:top_k]
+        head_m, tail_m = ordered[:m], ordered[m:]
+        head_m = (_bradley_terry(head_m, q, cross_encoder)
+                  if tournament_method == "bradley_terry"
+                  else _copeland_tournament(head_m))
+
+        head_scores = sorted((c.rank_score or 0.0 for c in ordered[:m]), reverse=True)
+        for pos, c in enumerate(head_m):
+            c.rank_score = head_scores[pos]
+        floor = head_scores[-1] if head_scores else 0.0
+        for i, c in enumerate(tail_m):
+            c.rank_score = floor - 1e-6 * (i + 1)
+        ordered = head_m + tail_m
+
+    w = weights if weights is not None else _default_weights()
+    profile = session.user_profile if session is not None else None
+    for c in ordered:
+        base = c.rank_score if c.rank_score is not None else 0.0
+        c.rank_score = base + _soft_adjustment(c, q, profile, w)
+
+    ranked = sorted(ordered, key=lambda c: c.rank_score, reverse=True)[:top_k]
 
     if len(ranked) >= 2:
         nxt = [c.rank_score for c in ranked[1:4]]
