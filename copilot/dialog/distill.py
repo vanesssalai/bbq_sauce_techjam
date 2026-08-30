@@ -40,3 +40,9 @@ def profile_calib(candidate: Candidate, profile: UserProfile | None) -> float:
         nudge -= _FIRST_TIMER_PENALTY
 
     return max(-_MAX_ABS, min(_MAX_ABS, nudge))
+
+
+def distill(state: SessionState) -> str:
+    """Short natural-language recap of `state.raw_history` (stored back on
+    `state.distilled_summary`), so later turns keep the prompt small."""
+    raise NotImplementedError

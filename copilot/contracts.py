@@ -82,6 +82,16 @@ class ParsedTurn:
     is_rejection: bool = False
 
 @dataclass
+class Query:
+    free_text: str                       # the SAME string fed to BM25 MATCH and to the dense encoder
+    slots: dict[str, Slot]               # active_slots(session); filters/rank pick what they need
+    negations: dict[str, list[str]]      # {attr: [values]} — never enters free_text
+    intent_p_buying: float               # 0..1 — drives fusion weights + MMR on/off
+    track: Literal["buying", "browsing"]
+    turn: int
+    dense_vec_override: list[float] | None = None   # set by PRF; dense.search uses it instead of encoding
+
+@dataclass
 class UserProfile:
     purchase_frequency: str
     average_prior_rating: float
@@ -95,8 +105,10 @@ class SessionState:
     turn: int = 0
     user_profile: UserProfile | None = None
     current_track: Literal["buying", "browsing"] | None = None
+    intent_p_buying: float = 0.5          # 0..1; set by the NLU/state-machine layer, read by retrieval.build_query
     slots: dict[str, Slot] = field(default_factory=dict)
     negated_values: dict[str, list[str]] = field(default_factory=dict)
+    disclosed_phrases: list[str] = field(default_factory=list)   # near-verbatim constraint text the customer has stated
     pending_ask_attribute: str | None = None
     asked_attributes: set[str] = field(default_factory=set)
     other_ask_count: int = 0
@@ -106,9 +118,7 @@ class SessionState:
     raw_history: list[tuple[str, str]] = field(default_factory=list)
     shown_asins: set[str] = field(default_factory=set)
     no_preference: set[str] = field(default_factory=set)
-    disclosed_phrases: list[str] = field(default_factory=list)
     clarify_count: int = 0
-    intent_p_buying: float = 0.5
     pending_relaxation: tuple[str, str | None] | None = None
 
 @dataclass
@@ -131,13 +141,13 @@ class TurnResult:
 
 @dataclass
 class Query:
-    hard_slots: dict[str, Slot] = field(default_factory=dict)   # user-STATED, filterable
-    soft_slots: dict[str, Slot] = field(default_factory=dict)   # colour/material/brand -- rerank boosts only
-    negations: dict[str, list[str]] = field(default_factory=dict)   # attr -> excluded values
-    free_text: str = ""                              # the SAME string fed to BM25 MATCH and the dense encoder
-    category_anchor: str = ""                        # verbatim turn-1 category phrase
-    intent_p_buying: float = 0.5                     # 0..1 EMA; high -> buyer/precision, low -> browser/diversify
-    dense_vec_override: list[float] | None = None    # set by PRF (Rocchio); dense.search uses it instead of encoding
+    hard_slots: dict[str, Slot] = field(default_factory=dict)
+    soft_slots: dict[str, Slot] = field(default_factory=dict)
+    negations: dict[str, list[str]] = field(default_factory=dict)
+    free_text: str = "" 
+    category_anchor: str = "" 
+    intent_p_buying: float = 0.5
+    dense_vec_override: list[float] | None = None
 
     @property
     def is_empty(self) -> bool:

@@ -2,14 +2,7 @@ from __future__ import annotations
 
 import re
 
-from ..contracts import (
-    HARD_FILTER_ATTRS,
-    SOFT_BOOST_ATTRS,
-    ParsedTurn,
-    Query,
-    SessionState,
-    Slot,
-)
+from ..contracts import HARD_FILTER_ATTRS, SOFT_BOOST_ATTRS, ParsedTurn, Query, SessionState, Slot
 from ..dialog.state_machine import active_slots, effective_confidence
 
 
@@ -80,15 +73,18 @@ def _dedup_join(parts: list[str]) -> str:
 def build_query(session: SessionState, parsed: ParsedTurn | None = None) -> Query:
     live = active_slots(session)
 
-    hard_slots = {
-        a: s for a, s in live.items()
-        if a in HARD_FILTER_ATTRS
-        and s.source in _HARD_FILTER_SOURCES
-        and effective_confidence(s, session.turn) >= _HARD_FILTER_MIN_CONF
-    }
+    slots: dict[str, Slot] = {}
+    for attr, slot in live.items():
+        if attr not in HARD_FILTER_ATTRS:
+            slots[attr] = slot
+        elif (
+            slot.source in _HARD_FILTER_SOURCES
+            and effective_confidence(slot, session.turn) >= _HARD_FILTER_MIN_CONF
+        ):
+            slots[attr] = slot
+
     soft_slots = {a: s for a, s in live.items() if a in SOFT_BOOST_ATTRS}
     negations = {a: list(v) for a, v in session.negated_values.items() if v}
-
     anchor = _category_anchor(session)
 
     parts: list[str] = []
@@ -105,13 +101,17 @@ def build_query(session: SessionState, parsed: ParsedTurn | None = None) -> Quer
     if not free_text and session.raw_history:
         free_text = session.raw_history[-1][1].strip()
 
+    track = session.current_track or (
+        "buying" if session.intent_p_buying >= 0.5 else "browsing"
+    )
+
     return Query(
-        hard_slots=hard_slots,
-        soft_slots=soft_slots,
-        negations=negations,
         free_text=free_text,
-        category_anchor=anchor,
+        slots=slots,
+        negations=negations,
         intent_p_buying=session.intent_p_buying,
+        track=track,
+        turn=session.turn,
     )
 
 
@@ -130,8 +130,7 @@ if __name__ == "__main__":
     demo.negated_values = {"color": ["gold"]}
 
     q = build_query(demo)
-    print("category_anchor:", repr(q.category_anchor))
-    print("hard_slots     :", {k: v.value for k, v in q.hard_slots.items()})
-    print("soft_slots     :", {k: v.value for k, v in q.soft_slots.items()})
-    print("negations      :", q.negations)
-    print("free_text      :", repr(q.free_text))
+    print("slots     :", {k: v.value for k, v in q.slots.items()})
+    print("negations :", q.negations)
+    print("track     :", q.track)
+    print("free_text :", repr(q.free_text))

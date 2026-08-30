@@ -32,6 +32,42 @@ mv catalog.jsonl data/catalog.jsonl
 
 Verify the downloaded file using the published `SHA256SUMS` file.
 
+## Download the Models
+
+Hybrid retrieval needs two sentence-transformers checkpoints. They are **not**
+committed (`models/` is git-ignored); reconstruct them from the pinned commit
+revisions with:
+
+```bash
+python scripts/download_models.py            # -> models/, plus models/SHA256SUMS
+python scripts/download_models.py --verify   # re-hash local files against SHA256SUMS
+```
+
+| role | model | dir |
+| --- | --- | --- |
+| bi-encoder (dense) | `BAAI/bge-small-en-v1.5` | `models/bge-small-en-v1.5/` |
+| cross-encoder (rerank) | `cross-encoder/ms-marco-MiniLM-L-6-v2` | `models/ms-marco-MiniLM-L-6-v2/` |
+
+`copilot/models.py` loads from `models/` when present (no network) and otherwise
+falls back to a revision-pinned Hub download. **Official scoring may run with
+network disabled, so `models/` must be included in the final submission bundle.**
+
+## Build the Dense Index
+
+The dense retrieval channel reads a precomputed embedding matrix (one row per
+catalog product, aligned to catalog line order). It is **not** committed
+(`data/dense_embeddings.npy` / `data/embedding_meta.json` are git-ignored);
+rebuild it after `download_models.py`:
+
+```bash
+python scripts/build_artifacts.py            # -> data/dense_embeddings.npy + embedding_meta.json
+python scripts/build_artifacts.py --verify   # check the artifact matches the current catalog
+```
+
+`embedding_meta.json` records the model revision and the catalog/embedding
+sha256s. If the artifact is missing, `DenseIndex` falls back to encoding the
+catalog at startup (slow). Include both files in the final submission bundle.
+
 ## Run the Starter
 
 Python 3.10 or later is recommended. The starter uses only the Python standard library.
