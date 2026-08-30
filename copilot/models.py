@@ -1,56 +1,100 @@
-"""Model name constants and lazy sentence-transformers wrappers.
-
-Wrappers load on first use, so importing this module needs no torch.
-
-Official final scoring may run with network access disabled.  Both models are
-therefore vendored into ``models/`` by ``scripts/download_models.py`` (pinned to
-the exact commit revisions below).  When that directory is present the wrappers
-load straight from disk and never touch the network; otherwise they fall back to
-a revision-pinned Hugging Face Hub download, which is dev-only.
-"""
-
 from __future__ import annotations
 
+import math
+import os
 from pathlib import Path
 
-# --- bi-encoder (dense retrieval) --------------------------------------------
+
+def _pick_device() -> str:
+    forced = os.environ.get("COPILOT_DEVICE", "").strip().lower()
+    if forced in ("cpu", "cuda", "mps"):
+        return forced
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available():
+            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+            try:
+                torch.ones(1, device="mps")
+                return "mps"
+            except Exception:
+                return "cpu"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def _construct(factory, source: str, device: str, **kwargs):
+    try:
+        return factory(source, device=device, **kwargs), device
+    except Exception:
+        if device == "cpu":
+            raise
+        return factory(source, device="cpu", **kwargs), "cpu"
+
+
+_GPU_BATCH = 128
+
 BI_ENCODER_NAME = "BAAI/bge-small-en-v1.5"
 BI_ENCODER_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
 BI_ENCODER_DIRNAME = "bge-small-en-v1.5"
-# bge-small-en-v1.5 is asymmetric: the *query* is prefixed with this instruction,
-# documents are encoded as-is.  Dropping it measurably hurts recall.
+
 BI_ENCODER_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
-# --- cross-encoder (second-stage rerank) ------------------------------------
 CROSS_ENCODER_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 CROSS_ENCODER_REVISION = "233902d25c440f23af6f7d6e94d2946bac0bee0a"
 CROSS_ENCODER_DIRNAME = "ms-marco-MiniLM-L-6-v2"
+
+NLI_ENCODER_NAME = "cross-encoder/nli-deberta-v3-xsmall"
+NLI_ENCODER_REVISION: str | None = None
+NLI_ENCODER_DIRNAME = "nli-deberta-v3-xsmall"
+
+_NLI_ENTAIL_IDX = 1
 
 MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 
 
 def _resolve(name: str, dirname: str) -> tuple[str, bool]:
-    """Return ``(path_or_id, is_local)``.
-
-    Prefer the vendored copy under ``models/`` so scoring never needs the
-    network; fall back to the Hub id when it is absent.
-    """
     local = MODELS_DIR / dirname
     if (local / "config.json").is_file():
         return str(local), True
     return name, False
 
 
+def _softmax(row) -> list[float]:
+    vals = [float(x) for x in row]
+    m = max(vals)
+    exps = [math.exp(x - m) for x in vals]
+    s = sum(exps) or 1.0
+    return [e / s for e in exps]
+
+
+class Encoder:
+    def __init__(self, bi_encoder: "BiEncoder | None" = None) -> None:
+        self._bi = bi_encoder if bi_encoder is not None else BiEncoder()
+
+    def encode(self, texts, *, is_query: bool = False) -> list[list[float]]:
+        vecs = self._bi.encode(list(texts), is_query=is_query)
+        if hasattr(vecs, "tolist"):
+            return vecs.tolist()
+        return [list(v) for v in vecs]
+
+    @property
+    def dim(self) -> int:
+        return int(self._bi.dim)
+
+    @property
+    def name(self) -> str:
+        return self._bi.name
+
+
 class BiEncoder:
-    """Dense embedding model. ``encode`` returns L2-normalized float32 vectors.
-
-    Pass ``is_query=True`` when embedding a search query so the bge instruction
-    prefix is applied; leave it False for catalog documents.
-    """
-
     def __init__(self, name: str = BI_ENCODER_NAME, device: str | None = None) -> None:
         self.name = name
-        self.device = device
+        self.device = device or _pick_device()
         self._model = None
         if name == BI_ENCODER_NAME:
             self.source, self.is_local = _resolve(name, BI_ENCODER_DIRNAME)
@@ -61,10 +105,12 @@ class BiEncoder:
         if self._model is None:
             from sentence_transformers import SentenceTransformer
 
-            kwargs: dict = {"device": self.device}
+            kwargs: dict = {}
             if not self.is_local:
                 kwargs["revision"] = BI_ENCODER_REVISION
-            self._model = SentenceTransformer(self.source, **kwargs)
+            self._model, self.device = _construct(
+                SentenceTransformer, self.source, self.device, **kwargs
+            )
         return self._model
 
     def encode(
@@ -83,9 +129,11 @@ class BiEncoder:
             return np.zeros((0, self.dim), dtype="float32")
         if is_query:
             items = [BI_ENCODER_QUERY_PREFIX + t for t in items]
-        vecs = self._load().encode(
+        model = self._load()
+        bs = batch_size or (_GPU_BATCH if self.device in ("cuda", "mps") else 64)
+        vecs = model.encode(
             items,
-            batch_size=batch_size,
+            batch_size=bs,
             convert_to_numpy=True,
             normalize_embeddings=normalize,
             show_progress_bar=False,
@@ -99,13 +147,6 @@ class BiEncoder:
 
 
 class CrossEncoder:
-    """Pairwise reranker. ``score`` returns one float32 relevance score per doc.
-
-    Scores are raw model logits (roughly -11..+11 for this checkpoint), not
-    probabilities: callers that blend them with other signals must normalize
-    first (e.g. sigmoid, or min-max over the batch).
-    """
-
     def __init__(
         self,
         name: str = CROSS_ENCODER_NAME,
@@ -113,7 +154,7 @@ class CrossEncoder:
         max_length: int = 512,
     ) -> None:
         self.name = name
-        self.device = device
+        self.device = device or _pick_device()
         self.max_length = max_length
         self._model = None
         if name == CROSS_ENCODER_NAME:
@@ -125,21 +166,66 @@ class CrossEncoder:
         if self._model is None:
             from sentence_transformers import CrossEncoder as _STCrossEncoder
 
-            kwargs: dict = {"device": self.device, "max_length": self.max_length}
+            kwargs: dict = {"max_length": self.max_length}
             if not self.is_local:
                 kwargs["revision"] = CROSS_ENCODER_REVISION
-            self._model = _STCrossEncoder(self.source, **kwargs)
+            self._model, self.device = _construct(
+                _STCrossEncoder, self.source, self.device, **kwargs
+            )
         return self._model
 
-    def score(self, query: str, docs, batch_size: int = 32):
+    def score(self, query: str, docs, batch_size: int | None = None):
         import numpy as np
 
         docs = list(docs)
         if not docs:
             return np.zeros(0, dtype="float32")
-        scores = self._load().predict(
+        model = self._load()
+        bs = batch_size or (_GPU_BATCH if self.device in ("cuda", "mps") else 32)
+        scores = model.predict(
             [(query, doc) for doc in docs],
-            batch_size=batch_size,
+            batch_size=bs,
             show_progress_bar=False,
         )
         return np.asarray(scores, dtype="float32")
+
+
+class NliCrossEncoder:
+
+    def __init__(self, name: str = NLI_ENCODER_NAME, device: str | None = None) -> None:
+        self.name = name
+        self.device = device or _pick_device()
+        self._model = None
+        if name == NLI_ENCODER_NAME:
+            self.source, self.is_local = _resolve(name, NLI_ENCODER_DIRNAME)
+        else:
+            self.source, self.is_local = name, Path(name).exists()
+
+    def _load(self):
+        if self._model is None:
+            from sentence_transformers import CrossEncoder as _STCrossEncoder
+
+            kwargs: dict = {}
+            if not self.is_local and NLI_ENCODER_REVISION:
+                kwargs["revision"] = NLI_ENCODER_REVISION
+            self._model, self.device = _construct(
+                _STCrossEncoder, self.source, self.device, **kwargs
+            )
+        return self._model
+
+    def entails_batch(self, pairs, batch_size: int | None = None) -> list[float]:
+        pairs = list(pairs)
+        if not pairs:
+            return []
+        model = self._load()
+        bs = batch_size or (_GPU_BATCH if self.device in ("cuda", "mps") else 32)
+        raw = model.predict(list(pairs), batch_size=bs, show_progress_bar=False)
+        rows = raw.tolist() if hasattr(raw, "tolist") else list(raw)
+        out: list[float] = []
+        for row in rows:
+            if isinstance(row, (int, float)):  # single-logit head -> sigmoid
+                out.append(1.0 / (1.0 + math.exp(-float(row))))
+                continue
+            probs = _softmax(row)
+            out.append(probs[_NLI_ENTAIL_IDX] if len(probs) > _NLI_ENTAIL_IDX else probs[-1])
+        return out

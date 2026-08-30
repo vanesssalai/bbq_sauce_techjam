@@ -1,24 +1,9 @@
-"""Hard slot filtering and graceful constraint relaxation.
-
-`apply_filters` removes candidates that violate a hard slot constraint
-(`size`, `department`, `category`, `price_min`, `price_max`) or a negation
-(`no red`, `not leather`), and stamps `filter_match` on every candidate it sees.
-When a filter set eliminates everything, `suggest_relaxation` picks the single
-constraint to loosen.
-
-Matchers are lenient: a candidate that is *missing* the attribute being filtered
-on passes, so sparse catalog rows are not silently dropped.
-"""
-
 from __future__ import annotations
 
-from ..contracts import Candidate, HARD_FILTER_ATTRS, Query, Slot
+from ..contracts import Candidate, HARD_FILTER_ATTRS, Slot
 
-# "under $50" still admits items up to $100; "over $50" admits down to $15.
-# Deliberately fuzzy budgets -- tune here if hard cutoffs are wanted.
-_PRICE_OVER_TOLERANCE = 2.0
-_PRICE_UNDER_TOLERANCE = 0.3
-
+_PRICE_OVER_TOLERANCE = 2.0   
+_PRICE_UNDER_TOLERANCE = 0.3 
 
 def _matches_category(candidate: Candidate, value: str) -> bool:
     if not candidate.categories:
@@ -93,11 +78,6 @@ def apply_filters(
     slots: dict[str, Slot],
     negated_values: dict[str, list[str]] | None = None,
 ) -> list[Candidate]:
-    """Return the candidates that pass every active hard filter and no negation.
-
-    Side effect: sets `filter_match` on *every* candidate in `candidates`, not
-    just the survivors.
-    """
     active = [(attr, slot.value) for attr, slot in slots.items() if attr in HARD_FILTER_ATTRS]
     negated_values = negated_values or {}
 
@@ -116,12 +96,6 @@ def apply_filters(
 def suggest_relaxation(
     candidates: list[Candidate], slots: dict[str, Slot]
 ) -> tuple[str, str | None] | None:
-    """Which single hard filter to drop so `candidates` is non-empty again.
-
-    Returns `(attr_to_drop, suggested_new_value_or_None)`, or `None` if no single
-    drop helps. For price drops the suggested value is the nearest price that was
-    just outside the stated bound.
-    """
     active = {attr: slot.value for attr, slot in slots.items() if attr in HARD_FILTER_ATTRS}
     if not active:
         return None
@@ -156,7 +130,6 @@ def apply_filters_with_relaxation(
     slots: dict[str, Slot],
     negated_values: dict[str, list[str]] | None = None,
 ) -> tuple[list[Candidate], tuple[str, str | None] | None]:
-    """`apply_filters`, plus a relaxation hint when it leaves nothing."""
     survivors = apply_filters(candidates, slots, negated_values)
     if survivors:
         return survivors, None
@@ -164,9 +137,4 @@ def apply_filters_with_relaxation(
 
 
 def filter_for_query(candidates: list[Candidate], query: Query) -> list[Candidate]:
-    """`apply_filters` driven straight off a `Query` (its slots + negations).
-
-    The seam retrieval calls: a first-stage `search()` runs its index, then
-    passes the raw hits through here before returning them.
-    """
     return apply_filters(candidates, query.slots, query.negations)

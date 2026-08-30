@@ -1,100 +1,91 @@
-"""Shared test fixtures: a hand-built fused `Candidate` pool (descending
-`fused_score`, 1-based `fused_rank`) so `rank()` and `retrieve()` can be tested
-independently.
-"""
-
 from __future__ import annotations
 
-import copy
-
-from copilot.contracts import Candidate
-
-TARGET_ASIN = "B000000003"
+from copilot.contracts import Candidate, Query, Slot, SessionState
 
 
 def make_candidate(
     parent_asin: str,
     title: str,
     *,
+    price: float | None = None,
+    brand: str | None = None,
+    categories: list[str] | None = None,
+    colors: list[str] | None = None,
+    material: str | None = None,
+    department: str | None = None,
+    average_rating: float = 4.0,
+    rating_number: int = 100,
+    bm25_score: float = 0.0,
+    dense_score: float = 0.0,
     fused_score: float | None = None,
     fused_rank: int | None = None,
-    **overrides,
 ) -> Candidate:
-    candidate = Candidate(parent_asin=parent_asin, title=title)
-    if fused_score is not None:
-        candidate.fused_score = fused_score
-    if fused_rank is not None:
-        candidate.fused_rank = fused_rank
-    for name, value in overrides.items():
-        if not hasattr(candidate, name):
-            raise AttributeError(f"Candidate has no field {name!r}")
-        setattr(candidate, name, value)
-    return candidate
+    return Candidate(
+        parent_asin=parent_asin,
+        title=title,
+        brand=brand,
+        categories=categories or [],
+        colors=colors or [],
+        material=material,
+        department=department,
+        price=price,
+        average_rating=average_rating,
+        rating_number=rating_number,
+        bm25_score=bm25_score,
+        dense_score=dense_score,
+        fused_score=fused_score,
+        fused_rank=fused_rank,
+        filter_match=True,
+    )
 
 
-_FUSED_CANDIDATES: list[Candidate] = [
-    make_candidate(
-        "B000000001", "Cotton Crew T-Shirt, White",
-        fused_score=0.92, fused_rank=1,
-        brand="Hanes", categories=["Clothing", "Tops", "T-Shirts"],
-        colors=["white"], material="cotton", department="men",
-        sizes=["S", "M", "L", "XL"], price=12.99,
-        average_rating=4.4, rating_number=1820,
-        bm25_score=8.1, dense_score=0.71,
-        search_text="cotton crew neck t-shirt white soft breathable everyday basic",
-    ),
-    make_candidate(
-        "B000000002", "Polyester Running Shorts, Black",
-        fused_score=0.81, fused_rank=2,
-        brand="Nike", categories=["Clothing", "Activewear", "Shorts"],
-        colors=["black"], material="polyester", department="men",
-        sizes=["M", "L", "XL"], price=24.0,
-        average_rating=4.6, rating_number=940,
-        bm25_score=6.7, dense_score=0.66,
-        search_text="polyester running shorts black moisture wicking gym training",
-    ),
-    make_candidate(
-        "B000000003", "Linen Button-Down Shirt, Navy",
-        fused_score=0.74, fused_rank=3,
-        brand="J. Crew", categories=["Clothing", "Tops", "Shirts"],
-        colors=["navy", "blue"], material="linen", department="men",
-        sizes=["S", "M", "L"], price=68.0,
-        average_rating=4.2, rating_number=310,
-        bm25_score=5.9, dense_score=0.63,
-        search_text="linen button down shirt navy lightweight summer breathable",
-    ),
-    make_candidate(
-        "B000000004", "Wool Blend Socks, 3-Pack Gray",
-        fused_score=0.55, fused_rank=4,
-        brand="Darn Tough", categories=["Clothing", "Socks"],
-        colors=["gray"], material="wool", department="unisex",
-        sizes=["M", "L"], price=19.5,
-        average_rating=4.8, rating_number=5600,
-        bm25_score=4.1, dense_score=0.48,
-        search_text="merino wool blend socks gray cushioned hiking warm",
-    ),
-    make_candidate(
-        "B000000005", "Leather Chelsea Boots, Brown",
-        fused_score=0.41, fused_rank=5,
-        brand="Thursday", categories=["Shoes", "Boots"],
-        colors=["brown"], material="leather", department="men",
-        sizes=["9", "10", "11"], price=199.0,
-        average_rating=4.5, rating_number=760,
-        bm25_score=3.3, dense_score=0.39,
-        search_text="leather chelsea boots brown goodyear welt ankle dress",
-    ),
-    make_candidate(
-        "B000000006", "Silk Scarf, Floral Pink",
-        fused_score=0.28, fused_rank=6,
-        brand="Echo", categories=["Accessories", "Scarves"],
-        colors=["pink"], material="silk", department="women",
-        price=45.0, average_rating=4.1, rating_number=95,
-        bm25_score=2.0, dense_score=0.25,
-        search_text="silk scarf floral pink lightweight accessory",
-    ),
-]
+def make_fixture_candidates() -> list[Candidate]:
+    """~5 hand-built candidates with preset scores, for testing rank() in isolation."""
+    return [
+        make_candidate("A1", "Leather Ankle Boots Brown", price=45.0, material="leather",
+                        colors=["brown"], categories=["shoes", "boots"],
+                        bm25_score=0.85, dense_score=0.80,
+                        fused_score=0.90, fused_rank=1),
+        make_candidate("A2", "Suede Ankle Boots Tan", price=120.0, material="suede",
+                        colors=["tan"], categories=["shoes", "boots"],
+                        bm25_score=0.55, dense_score=0.70,
+                        fused_score=0.75, fused_rank=2),
+        make_candidate("A3", "Canvas Sneakers White", price=30.0, material="canvas",
+                        colors=["white"], categories=["shoes", "sneakers"],
+                        bm25_score=0.70, dense_score=0.40,
+                        fused_score=0.60, fused_rank=3),
+        make_candidate("A4", "Leather Chelsea Boots Black", price=95.0, material="leather",
+                        colors=["black"], categories=["shoes", "boots"],
+                        bm25_score=0.40, dense_score=0.65,
+                        fused_score=0.55, fused_rank=4),
+        make_candidate("A5", "Rain Boots Yellow", price=25.0, material="rubber",
+                        colors=["yellow"], categories=["shoes", "boots"],
+                        bm25_score=0.30, dense_score=0.35,
+                        fused_score=0.40, fused_rank=5),
+        # A6: weak on bm25/dense/fused but the cross-encoder alone will (falsely) love it,
+        # since fused_score/fused_rank were never actually computed from these numbers.
+        # Lets us see the tournament pull a lone outlier CE score back toward consensus.
+        make_candidate("A6", "Leather Ankle Boots Espresso", price=50.0, material="leather",
+                        colors=["brown"], categories=["shoes", "boots"],
+                        bm25_score=0.20, dense_score=0.15,
+                        fused_score=0.10, fused_rank=6),
+    ]
 
 
-def fused_candidates() -> list[Candidate]:
-    """Fresh deep copy of the fused pool, safe to mutate."""
-    return [copy.deepcopy(candidate) for candidate in _FUSED_CANDIDATES]
+def make_fixture_query(**overrides) -> Query:
+    defaults = dict(
+        free_text="leather ankle boots",
+        slots={"material": Slot(value="leather", confidence=0.9, turn_set=1, source="explicit")},
+        negations={},
+        intent_p_buying=0.8,
+        track="buying",
+        turn=1,
+    )
+    defaults.update(overrides)
+    return Query(**defaults)
+
+
+def make_fixture_session(**overrides) -> SessionState:
+    defaults = dict(session_id="test-session-1", turn=1, current_track="buying")
+    defaults.update(overrides)
+    return SessionState(**defaults)

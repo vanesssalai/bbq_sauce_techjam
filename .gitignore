@@ -9,7 +9,12 @@ venv/
 env/
 
 # Evaluator output
-results.json
+results*.json
+
+# Vendored model weights (~216 MB) - regenerate with: python -m scripts.fetch_models
+# Ship these inside the submission archive, or track via Git LFS.
+models/
+**/.cache/
 
 # Precomputed dense-retrieval artifact — rebuild with `python scripts/build_artifacts.py`.
 data/dense_embeddings.npy
