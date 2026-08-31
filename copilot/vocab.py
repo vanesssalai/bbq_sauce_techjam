@@ -71,12 +71,32 @@ DEPARTMENT_SYNONYMS: dict[str, str] = {
 
 CATEGORY_WORDS = [
     "dress", "shirt", "t-shirt", "tshirt", "blouse", "jeans", "pants",
-    "trousers", "shoes", "sneakers", "boots", "sandals", "heels",
+    "trousers", "shoes", "sneakers", "boots", "sandals", "heels", "loafers",
+    "flats", "slippers", "clogs",
     "jacket", "coat", "sweater", "hoodie", "cardigan", "skirt", "shorts",
     "socks", "jewelry", "necklace", "ring", "earrings", "bracelet",
-    "watch", "bag", "purse", "backpack", "belt", "hat", "scarf", "gloves",
+    "watch", "bag", "handbag", "purse", "backpack", "wallet", "belt", "hat",
+    "cap", "scarf", "gloves", "sunglasses",
     "swimsuit", "bikini", "suit", "blazer", "jumpsuit", "leggings",
 ]
+
+CATEGORY_PHRASES: dict[str, str] = {
+    "running shoe": "shoes", "running shoes": "shoes",
+    "tennis shoe": "shoes", "tennis shoes": "shoes",
+    "walking shoe": "shoes", "walking shoes": "shoes",
+    "dress shoe": "shoes", "dress shoes": "shoes",
+    "ballet flats": "flats", "high heels": "heels",
+    "hiking boot": "boots", "hiking boots": "boots",
+    "ankle boot": "boots", "ankle boots": "boots",
+    "cross body bag": "bag", "crossbody bag": "bag", "cross-body bag": "bag",
+    "shoulder bag": "bag", "tote bag": "bag", "messenger bag": "bag",
+    "duffel bag": "bag", "duffle bag": "bag", "gym bag": "bag",
+    "hand bag": "handbag",
+    "baseball cap": "cap", "beanie hat": "hat", "sun hat": "hat",
+    "tank top": "shirt", "polo shirt": "shirt", "button down": "shirt",
+    "button-down": "shirt",
+    "yoga pants": "leggings", "sweat pants": "pants", "sweatpants": "pants",
+}
 
 BRAND_WORDS = [
     '2luv', '32 degrees', '5.11', 'adidas', 'adidas originals', 'aerosoles', 'ahnu', 'aldo',

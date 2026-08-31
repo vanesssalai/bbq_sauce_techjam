@@ -14,6 +14,7 @@ from ..vocab import (
     AFFIRMATION_PHRASES,
     AFFIRMATION_STARTS,
     BRAND_WORDS,
+    CATEGORY_PHRASES,
     CATEGORY_WORDS,
     COLOR_WORDS,
     COMPARATIVE_SLOT_SHIFT,
@@ -201,13 +202,23 @@ def _extract_department(text_lower: str) -> str | None:
 
 
 def _extract_category(text_lower: str) -> str | None:
-    matches: list[tuple[int, str]] = []
-    for word in CATEGORY_WORDS:
-        m = re.search(rf"\b{re.escape(word)}(?:es|s)?\b", text_lower)
+    # (start, is_word, value) — earliest mention wins; on a tie a multi-word
+    # product type ("dress shoes" -> "shoes") beats the bare word ("dress").
+    matches: list[tuple[int, int, str]] = []
+    for phrase, canonical in CATEGORY_PHRASES.items():
+        m = re.search(rf"\b{re.escape(phrase)}\b", text_lower)
         if m:
-            matches.append((m.start(), word))
-    matches.sort(key=lambda pair: pair[0])
-    return matches[0][1] if matches else None
+            matches.append((m.start(), 0, canonical))
+    for word in CATEGORY_WORDS:
+        # tolerate singular/plural both ways: "shoes" also matches "shoe",
+        # "shoe" also matches "shoes". Strip a lone trailing "s" ("shoes"->"shoe",
+        # "boots"->"boot") but leave "dress" alone.
+        stem = word[:-1] if word.endswith("s") and not word.endswith("ss") else word
+        m = re.search(rf"\b{re.escape(stem)}(?:es|s)?\b", text_lower)
+        if m:
+            matches.append((m.start(), 1, word))
+    matches.sort(key=lambda t: (t[0], t[1]))
+    return matches[0][2] if matches else None
 
 
 def _extract_price_range(text: str) -> tuple[float | None, float | None]:

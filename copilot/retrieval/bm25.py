@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from pathlib import Path
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -50,7 +51,8 @@ def _cell(value: object) -> str:
 class Bm25Index:
     def __init__(self, catalog_path: str | Path) -> None:
         self.catalog_path = Path(catalog_path)
-        self._conn = sqlite3.connect(":memory:")
+        self._conn = sqlite3.connect(":memory:", check_same_thread=False)
+        self._lock = threading.Lock()
         self._build()
 
     def _build(self) -> None:
@@ -100,11 +102,12 @@ class Bm25Index:
             return []
         match_expr = " OR ".join(phrase_exprs + [f'"{t}"' for t in terms])
         weight_args = ", ".join(str(w) for w in _BM25_WEIGHTS)
-        rows = self._conn.execute(
-            f"SELECT parent_asin, bm25(products, {weight_args}) AS b "
-            f"FROM products WHERE products MATCH ? ORDER BY b LIMIT {_FETCH_LIMIT}",
-            (match_expr,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT parent_asin, bm25(products, {weight_args}) AS b "
+                f"FROM products WHERE products MATCH ? ORDER BY b LIMIT {_FETCH_LIMIT}",
+                (match_expr,),
+            ).fetchall()
 
         hits: list[tuple[str, float]] = []
         for parent_asin, raw in rows:

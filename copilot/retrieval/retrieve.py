@@ -61,7 +61,7 @@ def retrieve(
         query.free_text, allowed_ids=allowed_ids, limit=channel_limit,
         phrases=getattr(query, "phrases", None),
     )
-    if _NO_DENSE:
+    if _NO_DENSE or indexes.dense is None:
         dense = []
         fused = fusion.fuse({"bm25": lexical}, {"bm25": 1.0}, limit=limit)
     else:

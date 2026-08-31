@@ -21,6 +21,12 @@ def get_agent() -> Agent:
 
 
 agent = get_agent()
+agent._ensure_ready()
+if agent.indexes is None:
+    st.warning(
+        "Retrieval index failed to build - the agent is serving catalog best-sellers, "
+        "not real search results. Check the `streamlit run` console for the traceback."
+    )
 
 with st.sidebar:
     st.header("Session")
@@ -64,8 +70,10 @@ def _considering(sid: str, turn: int, resp: dict) -> list[tuple[str, str]]:
         f"{a}={s.value!r}({s.confidence:.2f},{s.source})" for a, s in state.slots.items()
     ) or "-"
     prof = state.user_profile
+    mode = getattr(agent, "_last_retrieval_mode", "retrieval")
     rows = [
         ("turn", str(turn)),
+        ("retrieval mode", mode + ("" if mode == "retrieval" else "  <-- DEGRADED")),
         ("track / p_buying", f"{q.track}  {state.intent_p_buying:.2f}"),
         ("free_text (-> BM25 + CE)", q.free_text or "-"),
         ("slots", slots),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -17,6 +18,8 @@ from .ranking.rank import rank
 from .retrieval import retrieve as _retrieve_mod
 from .retrieval.query import build_query
 from .retrieval.retrieve import RetrievalIndexes, retrieve
+
+_log = logging.getLogger(__name__)
 
 _MAX_TURNS = 10
 _DENSE_NPY = Path("data/dense_embeddings.npy")
@@ -98,6 +101,7 @@ class Agent:
         self._nli = None
         self._models_ready = False
         self._last_relaxation: tuple[str, str | None] | None = None
+        self._last_retrieval_mode = "retrieval"
 
         self._sessions: dict[str, SessionState] = {}
 
@@ -108,23 +112,32 @@ class Agent:
         try:
             self._build_indexes()
         except Exception:
+            _log.warning("index build failed; retrieval degraded to popularity pool", exc_info=True)
             self.indexes = None
         self._build_optional_models()
 
     def _build_indexes(self) -> None:
-        from .models import BiEncoder
         from .retrieval.bm25 import Bm25Index
-        from .retrieval.dense import DenseIndex
 
-        encoder = BiEncoder()
         bm25 = Bm25Index(self.catalog_path)
-        if _DENSE_NPY.is_file() and _DENSE_META.is_file():
-            try:
-                dense = DenseIndex.load(_DENSE_NPY, _DENSE_META, encoder)
-            except Exception:
+
+        encoder = None
+        dense = None
+        try:
+            from .models import BiEncoder
+            from .retrieval.dense import DenseIndex
+
+            encoder = BiEncoder()
+            if _DENSE_NPY.is_file() and _DENSE_META.is_file():
+                try:
+                    dense = DenseIndex.load(_DENSE_NPY, _DENSE_META, encoder)
+                except Exception:
+                    dense = DenseIndex.build(self.catalog, encoder)
+            else: 
                 dense = DenseIndex.build(self.catalog, encoder)
-        else:  # slower startup fallback — run scripts/build_artifacts.py to skip this
-            dense = DenseIndex.build(self.catalog, encoder)
+        except Exception:
+            _log.warning("dense retrieval unavailable; using BM25-only", exc_info=True)
+
         self.indexes = RetrievalIndexes(bm25=bm25, dense=dense, encoder=encoder)
 
     def _build_optional_models(self) -> None:
@@ -262,13 +275,15 @@ class Agent:
     def _retrieve(self, query) -> list[Candidate]:
         self._last_relaxation = None
         if self.indexes is None:
-            return self._popularity_pool()
+            return self._degraded(query)
 
         try:
             cands = retrieve(query, self.catalog, self.indexes)
         except Exception:
-            return self._popularity_pool()
+            _log.warning("retrieve() failed; trying lexical fallback", exc_info=True)
+            return self._degraded(query)
         self._last_relaxation = getattr(_retrieve_mod, "last_relaxation", None)
+        self._last_retrieval_mode = "retrieval"
 
         if PRF_ON and cands:
             try:
@@ -285,7 +300,38 @@ class Agent:
             except Exception:
                 pass
 
-        return cands or self._popularity_pool()
+        return cands or self._degraded(query)
+
+    def _degraded(self, query) -> list[Candidate]:
+        """Retrieval proper produced nothing (or failed). Try raw BM25 on the query
+        text first, then fall back to the catalog best-sellers as a last resort."""
+        lexical = self._lexical_fallback(query)
+        if lexical:
+            self._last_retrieval_mode = "lexical-fallback"
+            return lexical
+        self._last_retrieval_mode = "popularity-pool"
+        return self._popularity_pool()
+
+    def _lexical_fallback(self, query) -> list[Candidate]:
+        """Raw BM25 on the query text — the last resort before the popularity pool,
+        so a degraded agent still returns on-topic results instead of best-sellers."""
+        if self.indexes is None or getattr(self.indexes, "bm25", None) is None:
+            return []
+        try:
+            hits = self.indexes.bm25.search(
+                query.free_text or "",
+                limit=200,
+                phrases=getattr(query, "phrases", None),
+            )
+        except Exception:
+            _log.warning("lexical fallback failed", exc_info=True)
+            return []
+        out: list[Candidate] = []
+        for i, (pid, score) in enumerate(hits):
+            c = self.catalog.get(pid)
+            if c is not None:
+                out.append(replace(c, bm25_score=score, fused_score=1.0 / (i + 1), fused_rank=i + 1))
+        return out
 
     def _popularity_pool(self, size: int = 200) -> list[Candidate]:
         pool = sorted(
