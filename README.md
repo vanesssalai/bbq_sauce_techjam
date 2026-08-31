@@ -1,123 +1,112 @@
 # TechJam Conversational Shopping Agent
 
-A multi-turn shopping assistant for the TechJam Conversational E-Commerce Search
-Challenge. Each session it receives an anonymized preference profile and a short
-customer message, then has **10 turns** to surface the customer's hidden target
-product in a Top-10 list, asking clarifying questions along the way.
+A conversational shopping agent for **TechJam 2026:
+Conversational E-Commerce Search** built so a that it can run it on a
+laptop with no paid API and no hosted LLM.
 
 ## Project Overview
 
-The pipeline, per turn:
+Over a frozen 50,000-product catalog, each session has one hidden target product.
+The customer talks for up to 10 turns; the agent must surface that product in its
+Top-10 as early and as highly-ranked as possible, asking clarifying questions
+along the way.
 
-```
-customer message
-  └─ dialog/nlu.py            rule-based slot + intent + disclosed-phrase extraction
-  └─ dialog/state_machine.py  merge/decay slots, accumulate disclosed phrases, track pivots
-  └─ retrieval/query.py       assemble one free_text string  (anchor + slots + disclosed phrases)
-  └─ retrieval/bm25.py        SQLite FTS5 BM25 over title/features/details/categories/store/description
-  └─ retrieval/retrieve.py    hydrate ~400 candidates (lexical only by default)
-  └─ ranking/rank.py          cross-encoder RRF-blend rerank of the top 30
-  └─ agent.py _order + _dialogue  dedupe, unseen-first, Top-10, pick the next question
-```
+Each turn: **NLU** (rule-based slot/intent extraction, no LLM) → **state update**
+→ **query build** → **retrieval** (SQLite FTS5 BM25, optional dense channel) →
+**RRF fusion** → **rerank** (cross-encoder blended into the rank via RRF, plus
+small soft adjustments) → **dialogue** (return the Top-10, ask up to ~6 grounded
+clarifying questions). See `IMPLEMENTATION_HANDOFF.md` for the full design.
 
-| choice | why |
-| --- | --- |
-| **Lexical (BM25) is the backbone**, dense retrieval **off** by default | the simulator discloses near-verbatim catalog `features`/`details` text, so exact term match wins; the bi-encoder adds noise (MRR −0.08, buying HR −0.08). |
-| **Ask up to 6 clarifying questions** (was 2) | the simulated customer volunteers almost nothing unprompted; every answer dumps near-verbatim feature text into the query. Capping at 2 left buying targets stuck at BM25 rank ~150. |
-| **Cross-encoder as an RRF *blend*, never the base** | raw `ms-marco-MiniLM` logits on a category-slot query render are miscalibrated; blending its rank with the retrieval rank (`1/(k+r_fused) + 1/(k+r_ce)`) lifts MRR +0.05 without hurting HR. |
-| **`rank()` returns a deep list (200), not 30** | `_order` walks down it across turns; a 30-item cap made every session go stale after turn 3. |
-| **Embedding semantic-slot resolver off** | it injected `style`/`use_case` guesses at a 0.42 cosine threshold and wrecked the sparse browsing queries (−0.22 Tech). |
-| **BM25 field weights: features/details heaviest**, `porter` stemming | matches what the customer discloses once the agent asks enough questions. |
+**Key features:**
+
+- **Hybrid retrieval**: SQLite FTS5 BM25 lexical search plus an optional dense
+  bi-encoder channel, combined with weighted Reciprocal Rank Fusion.
+- **Phrase matching**: the near-verbatim constraint phrases the customer
+  discloses are matched as exact FTS5 phrases, not just loose terms.
+- **Cross-encoder rerank**: a MiniLM reranker blended into the rank via RRF
+  (never used as the raw score), with soft adjustments for constraint
+  satisfaction, category/price fit, rating prior, and user-profile calibration.
+- **Rule-based NLU**: slots, intent, negation, and disclosed-phrase extraction
+  with zero LLM calls; deterministic and instant.
+- **Multi-turn state machine**: newest-value-wins slot merge, confidence decay,
+  intent-pivot handling, and a "no preference" freeze for the boundary case.
+- **Adaptive clarifying questions**: up to ~6 grounded follow-ups; each answer
+  feeds feature text back into the query.
+- **Offline and resilient**: runs fully offline, degrades gracefully to a
+  BM25 / popularity fallback if a model fails to load.
+
+**Small-business focus:** dependencies are just `sentence-transformers` +
+`torch` + `numpy` + `huggingface-hub`. The two models total ~220 MB and run on
+CPU. Every network path has an offline fallback (`HF_HUB_OFFLINE=1`), so once the
+models are vendored there are no further calls and no recurring cost.
 
 ## Setup and Installation
 
-Python **3.13** (3.10+ works; the pins target 3.13).
+Python 3.13 (3.10+ works).
 
 ```bash
-pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu 
+pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
-```
 
-**Catalog** — download `catalog.jsonl.gz` from the repo's GitHub Release, then:
-
-```bash
+# catalog
 gzip -dk catalog.jsonl.gz && mv catalog.jsonl data/catalog.jsonl
-```
 
-**Models** — the cross-encoder is required (`models/` is git-ignored). Reconstruct
-from the pinned revisions, then the agent runs with no network:
-
-```bash
+# models (vendored once, then no network needed)
 python scripts/download_models.py
-python scripts/download_models.py --verify   # re-hash against models/SHA256SUMS  -> OK
+python scripts/download_models.py --verify
 ```
 
-**Dev container / Codespaces** — open the repo in the container
-(`.devcontainer/devcontainer.json`): Python 3.13, all of the above (incl.
-`download_models.py`) run in `postCreate`, port 8501 forwarded, offline env vars set.
+Ship the `models/` folder with the submission: it is git-ignored and official
+scoring may run offline.
 
-## Usage
-
-### Score against the public set
+## Steps to Reproduce the Results
 
 From the repo root, with `data/catalog.jsonl` and `models/` in place:
 
 ```bash
-python -m evaluator.local_evaluator            # writes results.json (aggregate + per-scenario + per-session)
-HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python -m evaluator.local_evaluator   # enforce no network (offline)
+python -m evaluator.local_evaluator                                          # default config
 ```
 
-Deterministic (rule-based NLU, no sampling), so numbers reproduce exactly. CPU
-run ~20–30 min — the cross-encoder over the top 30 each turn dominates; add
-`COPILOT_NO_CROSS_ENCODER=1` for a ~4 min run.
-
-### Demo UI
-
+Other variations:
 ```bash
-streamlit run app.py            # http://localhost:8501
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python -m evaluator.local_evaluator   # offline check
+COPILOT_NO_CROSS_ENCODER=1 python -m evaluator.local_evaluator               # fast (~4 min)
 ```
 
-A chat window over the same `Agent`. The first request is slow (~1 min: 2 model
-checkpoints + a 50k-row FTS index, loaded once and kept warm). Each turn also
-prints what the agent used — `free_text`, slots, track/`p_buying`, disclosed
-phrases, `ask_attribute`, profile — to the `streamlit run` console and an
-in-page "What the agent is considering" panel.
+NLU is rule-based and nothing samples, so results are deterministic.
 
-### Configuration (env vars)
+| build | HitRate@10 | MRR | MTTC | Tech |
+| --- | --- | --- | --- | --- |
+| BM25 starter (`starter/agent.py`) | 0.930 | 0.554 | 4.59 | 0.760 |
+| this agent, no cross-encoder | 0.965 | 0.603 | 3.01 | 0.823 |
+| this agent, default | 0.965 | 0.626 | 2.99 | **0.831** |
 
-All optional; defaults are what the agent ships with.
+Optional demo UI: 
+```bash
+pip install streamlit && streamlit run app.py
+```
 
-| flag | effect |
+## Limitations & What We'd Improve With More Time
+
+- **`boundary` scenario stuck at HitRate 0.80**: when the customer says "no
+  preference", late-turn signal is thin. Next step would be to bind the user profile's
+  preference tags into the query on turn 1 instead of only as a late ranking nudge.
+- **Cross-encoder cost**: a full CPU eval takes ~20–30 min. A distilled or
+  quantised reranker would cut per-turn latency.
+- **Clarifying questions use fixed templates**: only `ask_attribute` is scored,
+  but real phrasing could be drawn from the retrieved pool ("cotton, polyester,
+  or leather?"): still without an LLM.
+- **Single-query retrieval**: firing each disclosed constraint as its own BM25
+  query and fusing would better reward candidates matching *all* constraints.
+
+## Contributions
+
+| Member | Area |
 | --- | --- |
-| `COPILOT_NO_CROSS_ENCODER=1` | skip the reranker (fast; degrades to fused order) |
-| `COPILOT_CE_TOP_N=N` | rerank the top N (default 30) |
-| `COPILOT_MAX_CLARIFY=N` | clarifying-question budget per session (default 6) |
-| `COPILOT_USE_DENSE=1` | re-enable the dense retrieval channel (off by default) |
-| `COPILOT_BM25_BASELINE=1` | starter's exact title-heavy BM25 config |
-| `COPILOT_SEM_SLOTS=1` | re-enable the embedding semantic-slot resolver (off by default) |
-| `COPILOT_TOURNAMENT=1` | Copeland tournament head over the top 20 |
-| `COPILOT_DEVICE=cpu\|cuda\|mps` | force the torch device |
-
-## Agent Interface
-
-```python
-class Agent:
-    def reset(self, session_id: str, user_profile: dict) -> None: ...
-    def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
-        return {
-            "message": "Any material or fabric you're set on?",
-            "ask_attribute": "material",            # or one of: category color size style brand
-                                                     #            budget feature use_case other  / null
-            "recommendations": [{"parent_asin": "B000..."}, ...],   # up to 10
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-        }
-```
-
-The session ends when the target `parent_asin` appears in the Top 10 or after
-turn 10. See `docs/agent_api_contract.json`.
+| **Vanessa** | Dialogue / NLU (`dialog/`), agent orchestration (`agent.py`), query wiring, offline model integration, evaluation & tuning |
+| **Leonard** | Retrieval stack: `retrieval/bm25.py`, `dense.py`, `fusion.py`, `prf.py`, `retrieve.py`, `filters.py`, `catalog.py`, `models.py`, `scripts/` |
+| **Sze Ho** | Reranking: `ranking/rank.py` (cross-encoder rerank, tournament, soft adjustments, MMR), `dialog/distill.py`, rank fixtures |
 
 ## Data Source
 
-Catalog and sessions are derived from Amazon Reviews 2023 (McAuley Lab, UCSD),
-Clothing/Shoes/Jewelry 5-core leave-last-out split. See `DATA_ATTRIBUTION.md`
-before using or redistributing the data.
+Derived from Amazon Reviews 2023 (McAuley Lab, UCSD). See `DATA_ATTRIBUTION.md`.
