@@ -34,8 +34,8 @@ customer message
 Python **3.13** (3.10+ works; the pins target 3.13).
 
 ```bash
+pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu 
 pip install -r requirements.txt
-pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
 ```
 
 **Catalog** — download `catalog.jsonl.gz` from the repo's GitHub Release, then:
@@ -45,21 +45,58 @@ gzip -dk catalog.jsonl.gz && mv catalog.jsonl data/catalog.jsonl
 ```
 
 **Models** — the cross-encoder is required (`models/` is git-ignored). Reconstruct
-from the pinned revisions:
+from the pinned revisions, then the agent runs with no network:
 
 ```bash
 python scripts/download_models.py
-
-python scripts/download_models.py --verify   # re-hash against models/SHA256SUMS
+python scripts/download_models.py --verify   # re-hash against models/SHA256SUMS  -> OK
 ```
 
-## Steps to Reproduce the Results
+**Dev container / Codespaces** — open the repo in the container
+(`.devcontainer/devcontainer.json`): Python 3.13, all of the above (incl.
+`download_models.py`) run in `postCreate`, port 8501 forwarded, offline env vars set.
+
+## Usage
+
+### Score against the public set
 
 From the repo root, with `data/catalog.jsonl` and `models/` in place:
 
 ```bash
-python -m evaluator.local_evaluator
+python -m evaluator.local_evaluator            # writes results.json (aggregate + per-scenario + per-session)
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python -m evaluator.local_evaluator   # enforce no network (offline)
 ```
+
+Deterministic (rule-based NLU, no sampling), so numbers reproduce exactly. CPU
+run ~20–30 min — the cross-encoder over the top 30 each turn dominates; add
+`COPILOT_NO_CROSS_ENCODER=1` for a ~4 min run.
+
+### Demo UI
+
+```bash
+streamlit run app.py            # http://localhost:8501
+```
+
+A chat window over the same `Agent`. The first request is slow (~1 min: 2 model
+checkpoints + a 50k-row FTS index, loaded once and kept warm). Each turn also
+prints what the agent used — `free_text`, slots, track/`p_buying`, disclosed
+phrases, `ask_attribute`, profile — to the `streamlit run` console and an
+in-page "What the agent is considering" panel.
+
+### Configuration (env vars)
+
+All optional; defaults are what the agent ships with.
+
+| flag | effect |
+| --- | --- |
+| `COPILOT_NO_CROSS_ENCODER=1` | skip the reranker (fast; degrades to fused order) |
+| `COPILOT_CE_TOP_N=N` | rerank the top N (default 30) |
+| `COPILOT_MAX_CLARIFY=N` | clarifying-question budget per session (default 6) |
+| `COPILOT_USE_DENSE=1` | re-enable the dense retrieval channel (off by default) |
+| `COPILOT_BM25_BASELINE=1` | starter's exact title-heavy BM25 config |
+| `COPILOT_SEM_SLOTS=1` | re-enable the embedding semantic-slot resolver (off by default) |
+| `COPILOT_TOURNAMENT=1` | Copeland tournament head over the top 20 |
+| `COPILOT_DEVICE=cpu\|cuda\|mps` | force the torch device |
 
 ## Agent Interface
 

@@ -81,13 +81,15 @@ def _soft_adjustments(
     weights: dict[str, float] | None,
 ) -> None:
     """In-place additive nudges to c.rank_score: price tier, category match,
-    tag overlap (color/material/brand), negation penalty, rating prior, profile calibration."""
+    soft-slot match (color/material/brand), negation penalty, rating prior, and
+    distill.profile_calib (which also carries the preference_tags term, so it is
+    not double-counted here)."""
     from copilot.dialog.distill import profile_calib
 
     w = {
         "price_tier": 0.05,
         "category_match": 0.05,
-        "tag_overlap": 0.03,
+        "soft_slot": 0.03,
         "negation_penalty": 0.20,
         "rating_prior": 0.03,
         "profile_calib": 1.0,
@@ -114,9 +116,13 @@ def _soft_adjustments(
             except (TypeError, ValueError):
                 pass
 
-        if category_slot is not None and c.categories:
-            if category_slot.value.lower() in [cat.lower() for cat in c.categories]:
-                adj += w["category_match"]
+        cat_hit = (
+            category_slot is not None
+            and bool(c.categories)
+            and category_slot.value.lower() in [cat.lower() for cat in c.categories]
+        )
+        if cat_hit:
+            adj += w["category_match"]
 
         overlap = 0
         for attr, slot in soft_slots.items():
@@ -127,7 +133,7 @@ def _soft_adjustments(
             elif attr == "brand" and c.brand and slot.value.lower() == c.brand.lower():
                 overlap += 1
         if overlap:
-            adj += w["tag_overlap"] * overlap
+            adj += w["soft_slot"] * overlap
 
         for attr, bad_values in (q.negations or {}).items():
             bad_lower = {v.lower() for v in bad_values}
@@ -144,7 +150,11 @@ def _soft_adjustments(
                 adj -= w["negation_penalty"]
 
         adj += w["rating_prior"] * (c.average_rating / 5.0)
-        adj += w["profile_calib"] * profile_calib(session.user_profile, c)
+
+        # how tightly this candidate matched the stated slots, in [0, 1]
+        slot_match = min(1.0, 0.6 * float(cat_hit) + 0.2 * overlap)
+        profile = session.user_profile if session is not None else None
+        adj += w["profile_calib"] * profile_calib(c, profile, slot_match=slot_match)
 
         c.rank_score = (c.rank_score if c.rank_score is not None else 0.0) + adj
 
@@ -269,14 +279,25 @@ def rank(
             for i, c in enumerate(by_fused):
                 c.rank_score = 1.0 / (1 + i)
 
-    # 7c: soft score adjustments -- small additive nudges on top of the base score.
-    _soft_adjustments(by_fused, q, session, weights)
+    # `top_k` here is the deep list length the agent walks across turns (~200),
+    # not the 10 that get shown. 7c/7d only need to decide the head; the tail is
+    # carried through in fused order.
+    head_k = min(top_k, 40)
+
+    # 7c: soft score adjustments -- small additive nudges. Skip the deep tail: a
+    # <=~0.15 nudge can't lift a rank-60 candidate into the shown top-10, and
+    # this is a ~7x cut in per-candidate regex/tokenisation work.
+    _soft_adjustments(by_fused[: max(head_k, 40)], q, session, weights)
 
     pool = sorted(by_fused, key=lambda c: c.rank_score, reverse=True)
     if q.track == "browsing":
-        # 7d: MMR diversity, browsing track only.
-        window = pool[:max(top_k * 3, 30)]
-        ranked = _mmr_diversify(window, top_k)
+        # 7d: MMR diversity, browsing track only -- over the head, not all 200
+        # (the old code ran O(top_k^2 * pool) similarity calls = the hot spot).
+        window = pool[: max(head_k * 3, 30)]
+        diversified = _mmr_diversify(window, head_k)
+        picked = {id(c) for c in diversified}
+        ranked = diversified + [c for c in pool if id(c) not in picked]
+        ranked = ranked[:top_k]
     else:
         ranked = pool[:top_k]
 

@@ -114,7 +114,6 @@ class SessionState:
     other_ask_count: int = 0
     has_pivoted: bool = False
     relaxed_attrs: list[str] = field(default_factory=list)
-    distilled_summary: str = ""
     raw_history: list[tuple[str, str]] = field(default_factory=list)
     shown_asins: set[str] = field(default_factory=set)
     no_preference: set[str] = field(default_factory=set)

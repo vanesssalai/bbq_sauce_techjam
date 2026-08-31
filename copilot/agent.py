@@ -39,7 +39,7 @@ except ValueError:
 
 _ASK_PRIORITY = ("feature", "material", "use_case", "color", "style", "budget", "size", "brand")
 _ASK_TEMPLATES = {
-    "feature": "Is there a specific feature that matters most here?",
+    "feature": "Is there anything that matters most here?",
     "material": "Any material or fabric you're set on?",
     "use_case": "What will you mainly use it for?",
     "color": "Any colour you have in mind?",

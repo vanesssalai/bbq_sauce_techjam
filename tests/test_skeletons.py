@@ -50,21 +50,11 @@ def test_fixture_pool_shape():
     assert fused_candidates()[0].rank_score is None  # fresh copy each call
 
 
-def test_skeletons_raise_not_implemented():
-    # Track R (§4a, incl. PRF) is implemented; what remains a skeleton is Track K.
-    from copilot.dialog.distill import distill
-    from copilot.ranking.rank import rank
+def test_distill_profile_calib_importable():
+    from copilot.dialog.distill import profile_calib
 
-    calls = [
-        lambda: rank(None, []),
-        lambda: distill(None),
-    ]
-    for call in calls:
-        try:
-            call()
-        except NotImplementedError:
-            continue
-        raise AssertionError("expected NotImplementedError")
+    assert callable(profile_calib)
+    assert profile_calib(None, None) == 0.0
 
 
 if __name__ == "__main__":
