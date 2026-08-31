@@ -90,6 +90,7 @@ class Query:
     track: Literal["buying", "browsing"]
     turn: int
     dense_vec_override: list[float] | None = None   # set by PRF; dense.search uses it instead of encoding
+    phrases: list[str] = field(default_factory=list)
 
 @dataclass
 class UserProfile:

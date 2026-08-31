@@ -74,10 +74,7 @@ def _dedup_join(parts: list[str]) -> str:
 def build_query(session: SessionState, parsed: ParsedTurn | None = None) -> Query:
     live = active_slots(session)
 
-    # Hard-filterable slots are gated to what the customer actually stated
-    # (explicit / clarification answer, confident enough), so a bad inferred /
-    # LLM / semantic guess can never filter the target out — RETRIEVAL_HANDOFF
-    # §2. Soft and free-text-only slots pass through untouched.
+
     slots: dict[str, Slot] = {}
     for attr, slot in live.items():
         if attr not in HARD_FILTER_ATTRS:
@@ -110,6 +107,14 @@ def build_query(session: SessionState, parsed: ParsedTurn | None = None) -> Quer
         "buying" if session.intent_p_buying >= 0.5 else "browsing"
     )
 
+    phrases: list[str] = []
+    seen_p: set[str] = set()
+    for p in ([anchor] + list(session.disclosed_phrases)):
+        p = (p or "").strip()
+        if p and len(p) >= 3 and p.lower() not in seen_p:
+            seen_p.add(p.lower())
+            phrases.append(p)
+
     return Query(
         free_text=free_text,
         slots=slots,
@@ -117,6 +122,7 @@ def build_query(session: SessionState, parsed: ParsedTurn | None = None) -> Quer
         intent_p_buying=session.intent_p_buying,
         track=track,
         turn=session.turn,
+        phrases=phrases,
     )
 
 

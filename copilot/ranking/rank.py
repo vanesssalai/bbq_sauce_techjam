@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import os
+import re
 
 from copilot.contracts import Candidate, Query, RankResult, SessionState
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
 
 
 def _flag(name: str) -> bool:
@@ -16,6 +19,12 @@ try:
     _CE_BLEND_W = float(os.environ.get("COPILOT_CE_BLEND_W", "1.0"))
 except ValueError:
     _CE_BLEND_W = 1.0
+
+_MMR_ON = _flag("COPILOT_MMR")
+try:
+    _SOFTADJ_SCALE = float(os.environ.get("COPILOT_SOFTADJ_SCALE", "1.0"))
+except ValueError:
+    _SOFTADJ_SCALE = 1.0
 
 
 def _build_ce_query(q: Query) -> str:
@@ -80,27 +89,31 @@ def _soft_adjustments(
     session: SessionState,
     weights: dict[str, float] | None,
 ) -> None:
-    """In-place additive nudges to c.rank_score: price tier, category match,
-    soft-slot match (color/material/brand), negation penalty, rating prior, and
-    distill.profile_calib (which also carries the preference_tags term, so it is
-    not double-counted here)."""
     from copilot.dialog.distill import profile_calib
 
     w = {
         "price_tier": 0.05,
         "category_match": 0.05,
         "soft_slot": 0.03,
-        "negation_penalty": 0.20,
-        "rating_prior": 0.03,
+        "negation_penalty": 0.06,
+        "rating_prior": 0.02,
+        "constraint_sat": 0.12,
         "profile_calib": 1.0,
     }
     if weights:
         w.update(weights)
+    if _SOFTADJ_SCALE != 1.0:
+        w = {k: v * _SOFTADJ_SCALE for k, v in w.items()}
 
     price_min_slot = q.slots.get("price_min")
     price_max_slot = q.slots.get("price_max")
     category_slot = q.slots.get("category")
     soft_slots = {attr: q.slots[attr] for attr in ("color", "material", "brand") if attr in q.slots}
+
+    phrase_toks = [
+        set(_WORD_RE.findall(p.lower())) for p in (getattr(q, "phrases", None) or [])
+    ]
+    phrase_toks = [pt for pt in phrase_toks if len(pt) >= 2]
 
     for c in candidates:
         adj = 0.0
@@ -150,6 +163,11 @@ def _soft_adjustments(
                 adj -= w["negation_penalty"]
 
         adj += w["rating_prior"] * (c.average_rating / 5.0)
+
+        if phrase_toks:
+            hay = set(_WORD_RE.findall((c.search_text or "").lower()))
+            sat = sum(1 for pt in phrase_toks if pt <= hay) / len(phrase_toks)
+            adj += w["constraint_sat"] * sat
 
         # how tightly this candidate matched the stated slots, in [0, 1]
         slot_match = min(1.0, 0.6 * float(cat_hit) + 0.2 * overlap)
@@ -274,30 +292,31 @@ def rank(
         if use_tournament:
             M = 20
             by_fused = _copeland_tournament(by_fused[:M]) + by_fused[M:]
-            # Re-stamp rank_score to reflect the tournament\'s decided order positionally,
-            # so soft adjustments below nudge *within* that order rather than discarding it.
+
             for i, c in enumerate(by_fused):
                 c.rank_score = 1.0 / (1 + i)
 
-    # `top_k` here is the deep list length the agent walks across turns (~200),
-    # not the 10 that get shown. 7c/7d only need to decide the head; the tail is
-    # carried through in fused order.
     head_k = min(top_k, 40)
+    head = by_fused[: max(head_k, 40)]
 
-    # 7c: soft score adjustments -- small additive nudges. Skip the deep tail: a
-    # <=~0.15 nudge can't lift a rank-60 candidate into the shown top-10, and
-    # this is a ~7x cut in per-candidate regex/tokenisation work.
-    _soft_adjustments(by_fused[: max(head_k, 40)], q, session, weights)
+    scores = [c.rank_score for c in head if c.rank_score is not None]
+    if scores:
+        lo, hi = min(scores), max(scores)
+        span = hi - lo
+        for c in head:
+            if c.rank_score is not None:
+                c.rank_score = (c.rank_score - lo) / span if span > 0 else 0.5
+        for i, c in enumerate(by_fused[len(head):]):
+            c.rank_score = -0.01 - i * 1e-4
+
+    _soft_adjustments(head, q, session, weights)
 
     pool = sorted(by_fused, key=lambda c: c.rank_score, reverse=True)
-    if q.track == "browsing":
-        # 7d: MMR diversity, browsing track only -- over the head, not all 200
-        # (the old code ran O(top_k^2 * pool) similarity calls = the hot spot).
+    if _MMR_ON and q.track == "browsing":
         window = pool[: max(head_k * 3, 30)]
         diversified = _mmr_diversify(window, head_k)
         picked = {id(c) for c in diversified}
-        ranked = diversified + [c for c in pool if id(c) not in picked]
-        ranked = ranked[:top_k]
+        ranked = (diversified + [c for c in pool if id(c) not in picked])[:top_k]
     else:
         ranked = pool[:top_k]
 

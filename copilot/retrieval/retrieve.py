@@ -57,7 +57,10 @@ def retrieve(
 
     allowed_ids: set[str] | None = survivor_ids if (_FILTER_RESTRICT and survivors) else None
 
-    lexical = indexes.bm25.search(query.free_text, allowed_ids=allowed_ids, limit=channel_limit)
+    lexical = indexes.bm25.search(
+        query.free_text, allowed_ids=allowed_ids, limit=channel_limit,
+        phrases=getattr(query, "phrases", None),
+    )
     if _NO_DENSE:
         dense = []
         fused = fusion.fuse({"bm25": lexical}, {"bm25": 1.0}, limit=limit)

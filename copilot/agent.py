@@ -37,6 +37,12 @@ try:
 except ValueError:
     _RANK_TOPK = 200
 
+_EARLY_STOP = _flag("COPILOT_EARLY_STOP")
+try:
+    _EARLY_STOP_GAP = float(os.environ.get("COPILOT_EARLY_STOP_GAP", "0.6"))
+except ValueError:
+    _EARLY_STOP_GAP = 0.6
+
 _ASK_PRIORITY = ("feature", "material", "use_case", "color", "style", "budget", "size", "brand")
 _ASK_TEMPLATES = {
     "feature": "Is there anything that matters most here?",
@@ -239,7 +245,13 @@ class Agent:
         recommendations = self._order(result.ranked, state, top_k)
         record_shown(state, [r["parent_asin"] for r in recommendations])
 
-        message, ask_attribute = self._dialogue(state, parsed, turn)
+        if (_EARLY_STOP and turn >= 2 and state.clarify_count >= 1
+                and result.score_gap >= _EARLY_STOP_GAP
+                and not (parsed.is_override or parsed.is_hard_reset)
+                and not self._last_relaxation):
+            message, ask_attribute = "Here are the closest matches.", None
+        else:
+            message, ask_attribute = self._dialogue(state, parsed, turn)
         return {
             "message": message,
             "ask_attribute": ask_attribute,

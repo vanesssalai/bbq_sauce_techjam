@@ -1,11 +1,3 @@
-"""Lexical (BM25) retrieval over the frozen catalog via SQLite FTS5.
-
-Ported from the starter agent's in-memory index. Built at startup (~2-4 s for
-50k rows), no on-disk artifact. `search()` returns `[(parent_asin, score)]`
-best-first with `score = -bm25(...)` (positive, higher = better); fusion uses
-rank position, not the scale.
-"""
-
 from __future__ import annotations
 
 import json
@@ -90,13 +82,23 @@ class Bm25Index:
         query_text: str,
         allowed_ids: set[str] | None = None,
         limit: int = 400,
+        phrases: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         terms = list(dict.fromkeys(_terms(query_text)))
         if _TERM_CAP:
             terms = terms[:_TERM_CAP]
-        if not terms:
+
+        phrase_exprs: list[str] = []
+        for p in phrases or []:
+            toks = _TOKEN_RE.findall((p or "").lower())
+            toks = [t for t in toks if len(t) > 1][:8]
+            if len(toks) >= 2:
+                phrase_exprs.append('"' + " ".join(toks) + '"')
+        phrase_exprs = list(dict.fromkeys(phrase_exprs))[:12]
+
+        if not terms and not phrase_exprs:
             return []
-        match_expr = " OR ".join(f'"{t}"' for t in terms)
+        match_expr = " OR ".join(phrase_exprs + [f'"{t}"' for t in terms])
         weight_args = ", ".join(str(w) for w in _BM25_WEIGHTS)
         rows = self._conn.execute(
             f"SELECT parent_asin, bm25(products, {weight_args}) AS b "
