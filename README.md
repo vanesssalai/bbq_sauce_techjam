@@ -15,7 +15,7 @@ Each turn: **NLU** (rule-based slot/intent extraction, no LLM) → **state updat
 → **query build** → **retrieval** (SQLite FTS5 BM25, optional dense channel) →
 **RRF fusion** → **rerank** (cross-encoder blended into the rank via RRF, plus
 small soft adjustments) → **dialogue** (return the Top-10, ask up to ~6 grounded
-clarifying questions). See `IMPLEMENTATION_HANDOFF.md` for the full design.
+clarifying questions). 
 
 **Key features:**
 
